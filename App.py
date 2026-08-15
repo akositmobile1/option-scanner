@@ -175,25 +175,30 @@ if selected_tickers:
         max_alloc_pct,
     )
     st.dataframe(df_results, use_container_width=True, hide_index=True)
-    # Optional Technical Chart Section
+    # Technical Chart Section
 st.markdown("---")
-st.subheader("📈 Technical Chart Inspector")
+st.markdown(
+    "<h3 style='font-size: 1.2rem; margin-bottom: 0px;'>📈 Technical Chart Inspector</h3>",
+    unsafe_allow_html=True,
+)
 chart_symbol = st.selectbox("Select Ticker to Inspect", selected_tickers)
 
 if chart_symbol:
     chart_df = yf.download(
         chart_symbol, period="6m", interval="1d", progress=False
     )
+
+    # Flatten yfinance MultiIndex columns safely
     if isinstance(chart_df.columns, pd.MultiIndex):
         chart_df.columns = chart_df.columns.get_level_values(0)
 
-    if not chart_df.empty:
-        # Calculate 20-day SMA for visual context
+    if not chart_df.empty and "Close" in chart_df.columns:
+        # Calculate indicators
         chart_df["SMA20"] = chart_df["Close"].rolling(20).mean()
 
         fig = go.Figure()
 
-        # Candlestick chart
+        # Candlestick Trace
         fig.add_trace(
             go.Candlestick(
                 x=chart_df.index,
@@ -205,23 +210,22 @@ if chart_symbol:
             )
         )
 
-        # 20 SMA Overlay Line
+        # 20 SMA Overlay
         fig.add_trace(
             go.Scatter(
                 x=chart_df.index,
                 y=chart_df["SMA20"],
                 mode="lines",
                 name="20 SMA",
-                line=dict(color="orange", width=1.5),
+                line=dict(color="#FF9900", width=1.5),
             )
         )
 
         fig.update_layout(
-            title=f"{chart_symbol} — 6 Month Daily Chart",
-            xaxis_rangeslider_visible=False,
             template="plotly_dark",
-            height=380,
-            margin=dict(l=10, r=10, t=35, b=10),
+            height=350,
+            margin=dict(l=5, r=5, t=10, b=10),
+            xaxis_rangeslider_visible=False,
             legend=dict(
                 orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
             ),
