@@ -4,12 +4,12 @@ import streamlit as st
 import yfinance as yf
 
 st.set_page_config(
-    page_title="Options & Swing Strategy Scanner", layout="wide"
+    page_title="Pro Options Scanner ($3k/Wk Target)", layout="wide"
 )
-st.title("🎯 Options Entry/Exit Scanner & Technical Dashboard")
+st.title("🎯 Pro Options Income Engine & Position Calculator")
 
 # Core Watchlist
-WATCHLIST = [
+DEFAULT_WATCHLIST = [
     "TMUS",
     "IREN",
     "TSLA",
@@ -24,20 +24,30 @@ WATCHLIST = [
 ]
 
 # Sidebar Controls
-st.sidebar.header("Scan Parameters")
+st.sidebar.header("💰 Portfolio & Target Settings")
+total_capital = st.sidebar.number_input(
+    "Total Portfolio Capital ($)", value=600000, step=25000
+)
+weekly_target = st.sidebar.number_input(
+    "Weekly Income Target ($)", value=3000, step=250
+)
+target_delta = st.sidebar.slider(
+    "Target Option Delta Offset", 0.05, 0.20, 0.08, 0.01
+)
+max_alloc_pct = (
+    st.sidebar.slider("Max Collateral per Stock (%)", 10, 35, 20) / 100.0
+)
+
+st.sidebar.header("📊 Technical Parameters")
 selected_tickers = st.sidebar.multiselect(
-    "Active Watchlist", WATCHLIST, default=WATCHLIST
+    "Active Watchlist", DEFAULT_WATCHLIST, default=DEFAULT_WATCHLIST
 )
-timeframe = st.sidebar.selectbox("Chart Timeframe", ["1d", "1h"], index=0)
-min_market_cap_b = st.sidebar.number_input(
-    "Min Market Cap ($B)", value=2.0, step=1.0
-)
-sma_fast_len = st.sidebar.slider("Fast Moving Average (SMA)", 5, 20, 10)
-sma_slow_len = st.sidebar.slider("Slow Moving Average (SMA)", 20, 50, 20)
+timeframe = st.sidebar.selectbox("Timeframe", ["1d", "1h"], index=0)
+sma_fast_len = st.sidebar.slider("Fast SMA", 5, 20, 10)
+sma_slow_len = st.sidebar.slider("Slow SMA", 20, 50, 20)
 
 
 def calculate_rsi(series, period=14):
-  """Calculates standard Relative Strength Index (RSI)."""
   delta = series.diff()
   gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
   loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -45,31 +55,13 @@ def calculate_rsi(series, period=14):
   return 100 - (100 / (1 + rs))
 
 
-def get_atm_iv(ticker_obj, spot_price):
-  """Extracts At-The-Money (ATM) Implied Volatility from the nearest option chain."""
-  try:
-    expirations = ticker_obj.options
-    if not expirations:
-      return 0.0
-    chain = ticker_obj.option_chain(expirations[0])
-    calls = chain.calls
-    if calls.empty:
-      return 0.0
-    calls["diff"] = (calls["strike"] - spot_price).abs()
-    atm_contract = calls.sort_values("diff").iloc[0]
-    return float(atm_contract["impliedVolatility"]) * 100
-  except Exception:
-    return 0.0
-
-
 @st.cache_data(ttl=300)
-def run_scanner(tickers, tf, min_cap):
+def run_pro_scanner(tickers, capital, target, delta_offset, max_alloc):
   results = []
-  period = "1y" if tf == "1d" else "1mo"
 
   for symbol in tickers:
     tk = yf.Ticker(symbol)
-    df = tk.history(period=period, interval=tf)
+    df = tk.history(period="1y", interval="1d")
 
     if df.empty or len(df) < sma_slow_len:
       continue
@@ -77,76 +69,91 @@ def run_scanner(tickers, tf, min_cap):
     if isinstance(df.columns, pd.MultiIndex):
       df.columns = df.columns.get_level_values(0)
 
-    info = tk.info or {}
-    mkt_cap = info.get("marketCap", 0) / 1e9
-
-    if mkt_cap < min_cap and mkt_cap > 0:
-      continue
-
-    # Pure Pandas Technicals
+    close_price = df["Close"].iloc[-1]
     df["RSI"] = calculate_rsi(df["Close"], 14)
-    df["SMA_Fast"] = df["Close"].rolling(window=sma_fast_len).mean()
-    df["SMA_Slow"] = df["Close"].rolling(window=sma_slow_len).mean()
+    rsi_val = df["RSI"].iloc[-1]
 
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
+    # Strike Estimates
+    put_strike = round(close_price * (1 - delta_offset), 2)
+    call_strike = round(close_price * (1 + delta_offset), 2)
 
-    close_price = latest["Close"]
-    rsi_val = latest["RSI"]
-    fast_val = latest["SMA_Fast"]
-    slow_val = latest["SMA_Slow"]
-
-    atm_iv = get_atm_iv(tk, close_price)
-
-    put_strike_est = close_price * 0.92
-    call_strike_est = close_price * 1.08
-
-    bullish_cross = (prev["SMA_Fast"] <= prev["SMA_Slow"]) and (
-        fast_val > slow_val
+    # Position Sizing Math
+    max_capital_ticker = capital * max_alloc
+    collateral_per_put = put_strike * 100
+    rec_contracts = (
+        int(max_capital_ticker // collateral_per_put)
+        if collateral_per_put > 0
+        else 0
     )
-    bearish_cross = (prev["SMA_Fast"] >= prev["SMA_Slow"]) and (
-        fast_val < slow_val
-    )
+    collateral_used = rec_contracts * collateral_per_put
 
-    if rsi_val < 38 or bullish_cross:
-      signal = "🟢 SELL CSP / BUY SHARES"
-    elif rsi_val > 68 or bearish_cross:
-      signal = "🔴 SELL COVERED CALL / TAKE PROFIT"
+    # Premium & Return Estimates (~0.5% - 1.0% Weekly Yield Proxy)
+    est_weekly_premium_per_contract = collateral_per_put * 0.006
+    est_weekly_income = rec_contracts * est_weekly_premium_per_contract
+
+    # Signal Rules
+    if symbol == "TMUS":
+      if rsi_val < 45:
+        signal = "🟢 SELL CSP (TMUS Dip)"
+      elif rsi_val > 62:
+        signal = "🔴 SELL COVERED CALL"
+      else:
+        signal = "⚪ NEUTRAL (Yield Focus)"
     else:
-      signal = "⚪ NEUTRAL / HOLD"
+      if rsi_val < 38:
+        signal = "🟢 SELL CSP / BUY SHARES"
+      elif rsi_val > 68:
+        signal = "🔴 SELL COVERED CALL"
+      else:
+        signal = "⚪ NEUTRAL / HOLD"
 
     results.append({
         "Ticker": symbol,
         "Price": f"${close_price:.2f}",
-        "Market Cap ($B)": (
-            f"${mkt_cap:.1f}B" if mkt_cap > 0 else "N/A"
-        ),
-        "ATM IV (%)": f"{atm_iv:.1f}%" if atm_iv > 0 else "N/A",
-        "RSI (14)": (
-            f"{rsi_val:.1f}" if pd.notnull(rsi_val) else "N/A"
-        ),
-        "Est. Put Strike (~0.18 Delta)": f"${put_strike_est:.2f}",
-        "Est. Call Strike (~0.18 Delta)": f"${call_strike_est:.2f}",
+        "RSI (14)": f"{rsi_val:.1f}" if pd.notnull(rsi_val) else "N/A",
+        "Target Put (~0.18 Delta)": f"${put_strike:.2f}",
+        "Target Call (~0.18 Delta)": f"${call_strike:.2f}",
+        "Max Contracts": rec_contracts,
+        "Required Collateral": f"${collateral_used:,.0f}",
+        "Est. Weekly Income": f"${est_weekly_income:,.0f}",
         "Signal": signal,
     })
 
   return pd.DataFrame(results)
 
 
-# Render Table
-if selected_tickers:
-  with st.spinner("Scanning market data and option chains..."):
-    scan_results = run_scanner(selected_tickers, timeframe, min_market_cap_b)
+# Render Portfolio Feasibility Metrics
+required_annual_yield = (
+    ((weekly_target * 52) / total_capital) * 100 if total_capital > 0 else 0
+)
 
-  st.subheader("Market Scan & Options Strike Targets")
+st.subheader("💡 Target Feasibility Summary")
+c1, c2, c3 = st.columns(3)
+c1.metric("Weekly Goal", f"${weekly_target:,.0f}/wk")
+c2.metric("Required Capital Base", f"${total_capital:,.0f}")
+c3.metric("Target Annual Yield", f"{required_annual_yield:.1f}%")
+
+st.markdown("---")
+
+# Render Main Scanner Table
+if selected_tickers:
+  with st.spinner("Scanning market data and computing position sizes..."):
+    scan_results = run_pro_scanner(
+        selected_tickers,
+        total_capital,
+        weekly_target,
+        target_delta,
+        max_alloc_pct,
+    )
+
+  st.subheader("📊 Trade Signals & Position Sizing Engine")
   st.dataframe(scan_results, use_container_width=True)
 
-  # Charting View
-  selected_stock = st.selectbox("Inspect Ticker Chart", selected_tickers)
+  # Charting Component
+  selected_stock = st.selectbox("Inspect Technical Chart", selected_tickers)
   if selected_stock:
     tk = yf.Ticker(selected_stock)
-    history_period = "1y" if timeframe == "1d" else "1mo"
-    chart_df = tk.history(period=history_period, interval=timeframe)
+    chart_df = tk.history(period="1y", interval="1d")
 
     if not chart_df.empty:
       if isinstance(chart_df.columns, pd.MultiIndex):
@@ -188,7 +195,7 @@ if selected_tickers:
       )
 
       fig.update_layout(
-          title=f"{selected_stock} Technical Chart",
+          title=f"{selected_stock} Interactive Chart",
           xaxis_rangeslider_visible=False,
           height=500,
       )
