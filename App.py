@@ -175,3 +175,56 @@ if selected_tickers:
         max_alloc_pct,
     )
     st.dataframe(df_results, use_container_width=True, hide_index=True)
+    # Optional Technical Chart Section
+st.markdown("---")
+st.subheader("📈 Technical Chart Inspector")
+chart_symbol = st.selectbox("Select Ticker to Inspect", selected_tickers)
+
+if chart_symbol:
+    chart_df = yf.download(
+        chart_symbol, period="6m", interval="1d", progress=False
+    )
+    if isinstance(chart_df.columns, pd.MultiIndex):
+        chart_df.columns = chart_df.columns.get_level_values(0)
+
+    if not chart_df.empty:
+        # Calculate 20-day SMA for visual context
+        chart_df["SMA20"] = chart_df["Close"].rolling(20).mean()
+
+        fig = go.Figure()
+
+        # Candlestick chart
+        fig.add_trace(
+            go.Candlestick(
+                x=chart_df.index,
+                open=chart_df["Open"],
+                high=chart_df["High"],
+                low=chart_df["Low"],
+                close=chart_df["Close"],
+                name="Price",
+            )
+        )
+
+        # 20 SMA Overlay Line
+        fig.add_trace(
+            go.Scatter(
+                x=chart_df.index,
+                y=chart_df["SMA20"],
+                mode="lines",
+                name="20 SMA",
+                line=dict(color="orange", width=1.5),
+            )
+        )
+
+        fig.update_layout(
+            title=f"{chart_symbol} — 6 Month Daily Chart",
+            xaxis_rangeslider_visible=False,
+            template="plotly_dark",
+            height=380,
+            margin=dict(l=10, r=10, t=35, b=10),
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
+            ),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
