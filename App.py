@@ -43,12 +43,16 @@ max_alloc_pct = (
 )
 
 st.sidebar.header("📊 Technical Parameters")
-selected_tickers = st.sidebar.multiselect(
-    "Active Watchlist", DEFAULT_WATCHLIST, default=DEFAULT_WATCHLIST
-)
+
 timeframe = st.sidebar.selectbox("Timeframe", ["1d", "1h"], index=0)
 sma_fast_len = st.sidebar.slider("Fast SMA", 5, 20, 10)
 sma_slow_len = st.sidebar.slider("Slow SMA", 20, 50, 20)
+selected_tickers = st.sidebar.multiselect(
+    "Active Watchlist",
+    DEFAULT_WATCHLIST,
+    default=DEFAULT_WATCHLIST,
+    key="watchlist_v2",
+)
 
 
 def calculate_rsi(series, period=14):
