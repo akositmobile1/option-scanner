@@ -1,5 +1,4 @@
 import pandas as pd
-import pandas_ta as ta
 import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
@@ -9,7 +8,7 @@ st.set_page_config(
 )
 st.title("🎯 Options Entry/Exit Scanner & Technical Dashboard")
 
-# Watchlist
+# Core Watchlist
 WATCHLIST = [
     "TMUS",
     "IREN",
@@ -33,8 +32,17 @@ timeframe = st.sidebar.selectbox("Chart Timeframe", ["1d", "1h"], index=0)
 min_market_cap_b = st.sidebar.number_input(
     "Min Market Cap ($B)", value=2.0, step=1.0
 )
-sma_fast = st.sidebar.slider("Fast Moving Average (SMA)", 5, 20, 10)
-sma_slow = st.sidebar.slider("Slow Moving Average (SMA)", 20, 50, 20)
+sma_fast_len = st.sidebar.slider("Fast Moving Average (SMA)", 5, 20, 10)
+sma_slow_len = st.sidebar.slider("Slow Moving Average (SMA)", 20, 50, 20)
+
+
+def calculate_rsi(series, period=14):
+  """Calculates standard Relative Strength Index (RSI)."""
+  delta = series.diff()
+  gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+  loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+  rs = gain / loss
+  return 100 - (100 / (1 + rs))
 
 
 def get_atm_iv(ticker_obj, spot_price):
@@ -63,7 +71,7 @@ def run_scanner(tickers, tf, min_cap):
     tk = yf.Ticker(symbol)
     df = tk.history(period=period, interval=tf)
 
-    if df.empty or len(df) < sma_slow:
+    if df.empty or len(df) < sma_slow_len:
       continue
 
     if isinstance(df.columns, pd.MultiIndex):
@@ -75,9 +83,10 @@ def run_scanner(tickers, tf, min_cap):
     if mkt_cap < min_cap and mkt_cap > 0:
       continue
 
-    df["RSI"] = ta.rsi(df["Close"], length=14)
-    df["SMA_Fast"] = ta.sma(df["Close"], length=sma_fast)
-    df["SMA_Slow"] = ta.sma(df["Close"], length=sma_slow)
+    # Pure Pandas Technicals
+    df["RSI"] = calculate_rsi(df["Close"], 14)
+    df["SMA_Fast"] = df["Close"].rolling(window=sma_fast_len).mean()
+    df["SMA_Slow"] = df["Close"].rolling(window=sma_slow_len).mean()
 
     latest = df.iloc[-1]
     prev = df.iloc[-2]
@@ -113,7 +122,9 @@ def run_scanner(tickers, tf, min_cap):
             f"${mkt_cap:.1f}B" if mkt_cap > 0 else "N/A"
         ),
         "ATM IV (%)": f"{atm_iv:.1f}%" if atm_iv > 0 else "N/A",
-        "RSI (14)": f"{rsi_val:.1f}",
+        "RSI (14)": (
+            f"{rsi_val:.1f}" if pd.notnull(rsi_val) else "N/A"
+        ),
         "Est. Put Strike (~0.18 Delta)": f"${put_strike_est:.2f}",
         "Est. Call Strike (~0.18 Delta)": f"${call_strike_est:.2f}",
         "Signal": signal,
@@ -130,7 +141,7 @@ if selected_tickers:
   st.subheader("Market Scan & Options Strike Targets")
   st.dataframe(scan_results, use_container_width=True)
 
-  # Individual Ticker Inspection
+  # Charting View
   selected_stock = st.selectbox("Inspect Ticker Chart", selected_tickers)
   if selected_stock:
     tk = yf.Ticker(selected_stock)
@@ -141,8 +152,12 @@ if selected_tickers:
       if isinstance(chart_df.columns, pd.MultiIndex):
         chart_df.columns = chart_df.columns.get_level_values(0)
 
-      chart_df["SMA_Fast"] = ta.sma(chart_df["Close"], length=sma_fast)
-      chart_df["SMA_Slow"] = ta.sma(chart_df["Close"], length=sma_slow)
+      chart_df["SMA_Fast"] = (
+          chart_df["Close"].rolling(window=sma_fast_len).mean()
+      )
+      chart_df["SMA_Slow"] = (
+          chart_df["Close"].rolling(window=sma_slow_len).mean()
+      )
 
       fig = go.Figure()
       fig.add_trace(
@@ -160,7 +175,7 @@ if selected_tickers:
               x=chart_df.index,
               y=chart_df["SMA_Fast"],
               line=dict(color="orange", width=1.5),
-              name=f"SMA {sma_fast}",
+              name=f"SMA {sma_fast_len}",
           )
       )
       fig.add_trace(
@@ -168,7 +183,7 @@ if selected_tickers:
               x=chart_df.index,
               y=chart_df["SMA_Slow"],
               line=dict(color="blue", width=1.5),
-              name=f"SMA {sma_slow}",
+              name=f"SMA {sma_slow_len}",
           )
       )
 
@@ -178,4 +193,3 @@ if selected_tickers:
           height=500,
       )
       st.plotly_chart(fig, use_container_width=True)
-
