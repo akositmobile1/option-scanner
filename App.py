@@ -3,10 +3,52 @@ import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 
+# Page setup with mobile responsiveness optimizations
 st.set_page_config(
-    page_title="Pro Options Scanner ($3k/Wk Target)", layout="wide"
+    page_title="Options Income Engine",
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
-st.title("🎯 Pro Options Income Engine & Position Calculator")
+
+# Custom CSS for Mobile Responsive Styling
+st.markdown(
+    """
+    <style>
+    /* Reduce top padding on mobile screens */
+    .block-container {
+        padding-top: 1.5rem !important;
+        padding-bottom: 1rem !important;
+        padding-left: 0.8rem !important;
+        padding-right: 0.8rem !important;
+    }
+    
+    /* Responsive Title Styling */
+    .mobile-title {
+        font-size: 1.4rem !important;
+        font-weight: 700 !important;
+        margin-bottom: 0.5rem !important;
+        line-height: 1.2 !important;
+    }
+    
+    /* Optimize table text size for portrait mode */
+    [data-testid="stDataFrame"] {
+        font-size: 0.85rem !important;
+    }
+    
+    /* Hide Streamlit default header spacing */
+    header[data-testid="stHeader"] {
+        background: transparent !important;
+    }
+    </style>
+""",
+    unsafe_allow_html=True,
+)
+
+# Compact, Mobile-Friendly Title
+st.markdown(
+    "<h2 class='mobile-title'>🎯 Options Income Engine</h2>",
+    unsafe_allow_html=True,
+)
 
 # Core Watchlist
 DEFAULT_WATCHLIST = [
@@ -30,24 +72,24 @@ DEFAULT_WATCHLIST = [
 # Sidebar Controls
 st.sidebar.header("💰 Portfolio & Target Settings")
 total_capital = st.sidebar.number_input(
-    "Total Portfolio Capital ($)", value=600000, step=25000
+    "Total Capital ($)", value=600000, step=25000
 )
 weekly_target = st.sidebar.number_input(
-    "Weekly Income Target ($)", value=3000, step=250
+    "Weekly Target ($)", value=3000, step=250
 )
 target_delta = st.sidebar.slider(
-    "Target Option Delta Offset", 0.05, 0.20, 0.08, 0.01
+    "Delta Offset", 0.05, 0.20, 0.08, 0.01
 )
 max_alloc_pct = (
     st.sidebar.slider("Max Collateral per Stock (%)", 10, 35, 20) / 100.0
 )
 
-st.sidebar.header("📊 Technical Parameters")
+st.sidebar.header("📊 Active Tickers")
 selected_tickers = st.sidebar.multiselect(
-    "Active Watchlist",
+    "Watchlist",
     DEFAULT_WATCHLIST,
     default=DEFAULT_WATCHLIST,
-    key="watchlist_v2",
+    key="watchlist_v3",
 )
 
 
@@ -83,7 +125,7 @@ def run_pro_scanner(tickers, capital, target, delta_offset, max_alloc):
         )
         est_weekly_premium_per_contract = est_contract_premium / 4.0
 
-        # 4. Position Sizing & Collateral Caps (20% Max per Ticker)
+        # 4. Position Sizing & Collateral Caps
         max_collateral = capital * max_alloc
         max_contracts = max(1, int(max_collateral / (current_price * 100)))
         total_weekly_est = (
@@ -98,7 +140,6 @@ def run_pro_scanner(tickers, capital, target, delta_offset, max_alloc):
         rsi = float(100 - (100 / (1 + rs)).iloc[-1])
 
         sma_fast = float(df["Close"].rolling(20).mean().iloc[-1])
-        sma_slow = float(df["Close"].rolling(50).mean().iloc[-1])
 
         # Trade Signal Logic
         signal = "NEUTRAL"
@@ -111,13 +152,13 @@ def run_pro_scanner(tickers, capital, target, delta_offset, max_alloc):
             {
                 "Ticker": symbol,
                 "Price": round(current_price, 2),
-                "RSI (14)": round(rsi, 1),
+                "RSI": round(rsi, 1),
                 "Signal": signal,
-                "Target Put Strike": round(target_put_strike, 2),
-                "Target Call Strike": round(target_call_strike, 2),
-                "Max Contracts": max_contracts,
-                "Max Collateral": f"${round(max_contracts * current_price * 100, 2):,}",
-                "Est. Weekly Income": f"${round(total_weekly_est, 2)}",
+                "Put Strike": round(target_put_strike, 2),
+                "Call Strike": round(target_call_strike, 2),
+                "Contracts": max_contracts,
+                "Collateral": f"${round(max_contracts * current_price * 100, 0):,.0f}",
+                "Est. Wk Income": f"${round(total_weekly_est, 2)}",
             }
         )
 
@@ -133,4 +174,4 @@ if selected_tickers:
         target_delta,
         max_alloc_pct,
     )
-    st.dataframe(df_results, use_container_width=True)
+    st.dataframe(df_results, use_container_width=True, hide_index=True)
