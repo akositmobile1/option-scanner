@@ -18,6 +18,10 @@ DEFAULT_WATCHLIST = [
     "AMD",
     "NVDA",
     "PLTR",
+    "SKHY"
+    "ENPH"
+    "AGNC"
+    "GOOG"
     "MSTR",
     "COIN",
     "SMCI",
