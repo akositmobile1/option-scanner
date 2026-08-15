@@ -77,32 +77,36 @@ def run_pro_scanner(tickers, capital, target, delta_offset, max_alloc):
             
         current_price = float(df['Close'].iloc[-1])
         
-        # 1. Measure Daily Volatility (Average True Range / Price)
+        # Target Strike Prices (~0.18 Delta Offset)
+        target_put_strike = current_price * (1 - delta_offset)
+        target_call_strike = current_price * (1 + delta_offset)
+        
+        # Volatility-Scaled Premium Calculation
         daily_range = (df['High'] - df['Low']).tail(14).mean()
         volatility_pct = daily_range / current_price
-
-        # 2. Volatility-Adjusted 30-45 DTE Estimated Premium per Share
         est_contract_premium = current_price * delta_offset * (volatility_pct * 12)
-        
-        # 3. Weekly Normalized Income per Contract
         est_weekly_premium_per_contract = est_contract_premium / 4.0
         
-        # 4. Position Sizing Logic (20% Max Cap)
+        # Position Sizing & Collateral Caps (20% Max per Ticker)
         max_collateral = capital * max_alloc
         max_contracts = max(1, int(max_collateral / (current_price * 100)))
         total_weekly_est = est_weekly_premium_per_contract * 100 * max_contracts
         
-        # Technical Signal Indicators
+        # Technical Indicators: RSI (14) & SMAs (20/50)
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rs = gain / loss
         rsi = float(100 - (100 / (1 + rs)).iloc[-1])
         
+        sma_fast = float(df['Close'].rolling(20).mean().iloc[-1])
+        sma_slow = float(df['Close'].rolling(50).mean().iloc[-1])
+        
+        # Trade Signal Logic
         signal = "NEUTRAL"
-        if rsi < 40:
+        if rsi < 40 and current_price <= sma_fast:
             signal = "🟢 SELL CSP"
-        elif rsi > 60:
+        elif rsi > 60 and current_price >= sma_fast:
             signal = "🔴 SELL CC"
             
         results.append({
@@ -110,11 +114,15 @@ def run_pro_scanner(tickers, capital, target, delta_offset, max_alloc):
             "Price": round(current_price, 2),
             "RSI (14)": round(rsi, 1),
             "Signal": signal,
+            "Target Put Strike": round(target_put_strike, 2),
+            "Target Call Strike": round(target_call_strike, 2),
             "Max Contracts": max_contracts,
+            "Max Collateral": f"${round(max_contracts * current_price * 100, 2):,}",
             "Est. Weekly Income": f"${round(total_weekly_est, 2)}"
         })
         
     return pd.DataFrame(results)
+
 
 
 
