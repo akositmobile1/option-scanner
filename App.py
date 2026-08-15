@@ -14,28 +14,21 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* Reduce top padding on mobile screens */
     .block-container {
         padding-top: 1.5rem !important;
         padding-bottom: 1rem !important;
         padding-left: 0.8rem !important;
         padding-right: 0.8rem !important;
     }
-    
-    /* Responsive Title Styling */
     .mobile-title {
         font-size: 1.4rem !important;
         font-weight: 700 !important;
         margin-bottom: 0.5rem !important;
         line-height: 1.2 !important;
     }
-    
-    /* Optimize table text size for portrait mode */
     [data-testid="stDataFrame"] {
         font-size: 0.85rem !important;
     }
-    
-    /* Hide Streamlit default header spacing */
     header[data-testid="stHeader"] {
         background: transparent !important;
     }
@@ -44,7 +37,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Compact, Mobile-Friendly Title
+# Compact Header
 st.markdown(
     "<h2 class='mobile-title'>🎯 Options Income Engine</h2>",
     unsafe_allow_html=True,
@@ -89,7 +82,7 @@ selected_tickers = st.sidebar.multiselect(
     "Watchlist",
     DEFAULT_WATCHLIST,
     default=DEFAULT_WATCHLIST,
-    key="watchlist_v3",
+    key="watchlist_v4",
 )
 
 
@@ -102,7 +95,7 @@ def run_pro_scanner(tickers, capital, target, delta_offset, max_alloc):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        if df.empty:
+        if df.empty or "Close" not in df.columns:
             continue
 
         current_price = float(df["Close"].iloc[-1])
@@ -132,7 +125,7 @@ def run_pro_scanner(tickers, capital, target, delta_offset, max_alloc):
             est_weekly_premium_per_contract * 100 * max_contracts
         )
 
-        # Technical Indicators: RSI (14) & SMAs (20/50)
+        # Technical Indicators: RSI (14) & SMA (20)
         delta = df["Close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -175,10 +168,11 @@ if selected_tickers:
         max_alloc_pct,
     )
     st.dataframe(df_results, use_container_width=True, hide_index=True)
-    # Technical Chart Section
+
+# Technical Chart Section
 st.markdown("---")
 st.markdown(
-    "<h3 style='font-size: 1.2rem; margin-bottom: 0px;'>📈 Technical Chart Inspector</h3>",
+    "<h3 style='font-size: 1.1rem; margin-bottom: 0px;'>📈 Technical Chart Inspector</h3>",
     unsafe_allow_html=True,
 )
 chart_symbol = st.selectbox("Select Ticker to Inspect", selected_tickers)
@@ -188,12 +182,10 @@ if chart_symbol:
         chart_symbol, period="6m", interval="1d", progress=False
     )
 
-    # Flatten yfinance MultiIndex columns safely
     if isinstance(chart_df.columns, pd.MultiIndex):
         chart_df.columns = chart_df.columns.get_level_values(0)
 
     if not chart_df.empty and "Close" in chart_df.columns:
-        # Calculate indicators
         chart_df["SMA20"] = chart_df["Close"].rolling(20).mean()
 
         fig = go.Figure()
@@ -231,4 +223,3 @@ if chart_symbol:
             ),
         )
         st.plotly_chart(fig, use_container_width=True)
-
