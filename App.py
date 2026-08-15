@@ -1,15 +1,14 @@
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 
-# Page setup optimized for mobile responsiveness
 st.set_page_config(
     page_title="Options Income Engine",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-# Custom CSS for Mobile Styling
 st.markdown(
     """
     <style>
@@ -58,7 +57,6 @@ DEFAULT_WATCHLIST = [
     "SMCI",
 ]
 
-# Sidebar Controls (Explicit keys added to eliminate duplicate ID errors)
 st.sidebar.header("💰 Portfolio Settings")
 total_capital = st.sidebar.number_input(
     "Total Capital ($)", value=600000, step=25000, key="capital_input"
@@ -80,7 +78,7 @@ selected_tickers = st.sidebar.multiselect(
     "Watchlist",
     DEFAULT_WATCHLIST,
     default=DEFAULT_WATCHLIST,
-    key="watchlist_v8",
+    key="watchlist_v9",
 )
 
 
@@ -98,11 +96,9 @@ def run_pro_scanner(tickers, capital, target, delta_offset, max_alloc):
 
         current_price = float(df["Close"].iloc[-1])
 
-        # Daily Volatility Calculation
         daily_range = (df["High"] - df["Low"]).tail(14).mean()
         volatility_pct = daily_range / current_price
 
-        # Volatility-Adjusted Target Strikes
         target_put_strike = current_price * (
             1 - (delta_offset * volatility_pct * 15)
         )
@@ -110,7 +106,6 @@ def run_pro_scanner(tickers, capital, target, delta_offset, max_alloc):
             1 + (delta_offset * volatility_pct * 15)
         )
 
-        # Premium & Sizing
         est_contract_premium = (
             current_price * delta_offset * (volatility_pct * 12)
         )
@@ -122,7 +117,6 @@ def run_pro_scanner(tickers, capital, target, delta_offset, max_alloc):
             est_weekly_premium_per_contract * 100 * max_contracts
         )
 
-        # RSI & Signal
         delta = df["Close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -154,7 +148,6 @@ def run_pro_scanner(tickers, capital, target, delta_offset, max_alloc):
     return pd.DataFrame(results)
 
 
-# Render Table
 if selected_tickers:
     df_results = run_pro_scanner(
         selected_tickers,
@@ -165,7 +158,7 @@ if selected_tickers:
     )
     st.dataframe(df_results, use_container_width=True, hide_index=True)
 
-# Technical Chart Section
+# Technical Chart Section via TradingView Embed
 st.markdown("---")
 st.markdown(
     "<h3 style='font-size: 1.1rem; margin-bottom: 0px;'>📈 Technical Chart Inspector</h3>",
@@ -176,16 +169,25 @@ chart_symbol = st.selectbox(
 )
 
 if chart_symbol:
-    try:
-        t = yf.Ticker(chart_symbol)
-        df_chart = t.history(period="6m")
-
-        if not df_chart.empty:
-            chart_data = pd.DataFrame(index=df_chart.index)
-            chart_data["Price"] = df_chart["Close"]
-            chart_data["20 SMA"] = df_chart["Close"].rolling(20).mean()
-            st.line_chart(chart_data)
-        else:
-            st.warning(f"No price data available for {chart_symbol}.")
-    except Exception as e:
-        st.error(f"Error loading chart for {chart_symbol}: {e}")
+    tv_code = f"""
+    <div class="tradingview-widget-container" style="height:450px;width:100%;">
+      <div id="tradingview_chart" style="height:450px;width:100%;"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+      new TradingView.widget({{
+        "autosize": true,
+        "symbol": "{chart_symbol}",
+        "interval": "D",
+        "timezone": "Etc/UTC",
+        "theme": "dark",
+        "style": "1",
+        "locale": "en",
+        "toolbar_bg": "#f1f3f6",
+        "enable_publishing": false,
+        "allow_symbol_change": true,
+        "container_id": "tradingview_chart"
+      }});
+      </script>
+    </div>
+    """
+    components.html(tv_code, height=460)
