@@ -1,32 +1,31 @@
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 
-# Mobile setup
+# Page setup optimized for mobile responsiveness
 st.set_page_config(
     page_title="Options Income Engine",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-# Custom CSS for Mobile
+# Custom CSS for Mobile Styling
 st.markdown(
     """
     <style>
     .block-container {
-        padding-top: 1.5rem !important;
+        padding-top: 1.2rem !important;
         padding-bottom: 1rem !important;
-        padding-left: 0.8rem !important;
-        padding-right: 0.8rem !important;
+        padding-left: 0.6rem !important;
+        padding-right: 0.6rem !important;
     }
     .mobile-title {
-        font-size: 1.4rem !important;
+        font-size: 1.3rem !important;
         font-weight: 700 !important;
         margin-bottom: 0.5rem !important;
     }
     [data-testid="stDataFrame"] {
-        font-size: 0.85rem !important;
+        font-size: 0.82rem !important;
     }
     header[data-testid="stHeader"] {
         background: transparent !important;
@@ -59,8 +58,8 @@ DEFAULT_WATCHLIST = [
     "SMCI",
 ]
 
-# Sidebar
-st.sidebar.header("💰 Settings")
+# Sidebar Controls
+st.sidebar.header("💰 Portfolio Settings")
 total_capital = st.sidebar.number_input(
     "Total Capital ($)", value=600000, step=25000
 )
@@ -78,7 +77,7 @@ selected_tickers = st.sidebar.multiselect(
     "Watchlist",
     DEFAULT_WATCHLIST,
     default=DEFAULT_WATCHLIST,
-    key="watchlist_v5",
+    key="watchlist_v6",
 )
 
 
@@ -100,7 +99,7 @@ def run_pro_scanner(tickers, capital, target, delta_offset, max_alloc):
         daily_range = (df["High"] - df["Low"]).tail(14).mean()
         volatility_pct = daily_range / current_price
 
-        # Target Strikes
+        # Volatility-Adjusted Target Strikes
         target_put_strike = current_price * (
             1 - (delta_offset * volatility_pct * 15)
         )
@@ -152,7 +151,7 @@ def run_pro_scanner(tickers, capital, target, delta_offset, max_alloc):
     return pd.DataFrame(results)
 
 
-# Render Scanner Table
+# Render Table
 if selected_tickers:
     df_results = run_pro_scanner(
         selected_tickers,
@@ -165,49 +164,24 @@ if selected_tickers:
 
 # Technical Chart Section
 st.markdown("---")
-st.subheader("📈 Technical Chart Inspector")
+st.markdown(
+    "<h3 style='font-size: 1.1rem; margin-bottom: 0px;'>📈 Technical Chart Inspector</h3>",
+    unsafe_allow_html=True,
+)
 chart_symbol = st.selectbox("Select Ticker to Inspect", selected_tickers)
 
 if chart_symbol:
-    # Use Ticker.history for clean, single-level columns
-    ticker_obj = yf.Ticker(chart_symbol)
-    chart_df = ticker_obj.history(period="6m", interval="1d")
+    df_chart = yf.download(
+        chart_symbol, period="6m", interval="1d", progress=False
+    )
+    if isinstance(df_chart.columns, pd.MultiIndex):
+        df_chart.columns = df_chart.columns.get_level_values(0)
 
-    if not chart_df.empty:
-        chart_df["SMA20"] = chart_df["Close"].rolling(20).mean()
+    if not df_chart.empty and "Close" in df_chart.columns:
+        # Prepare clean Dataframe for native Streamlit line chart
+        chart_data = pd.DataFrame()
+        chart_data["Price"] = df_chart["Close"]
+        chart_data["20 SMA"] = df_chart["Close"].rolling(20).mean()
 
-        fig = go.Figure()
-
-        # Candlestick
-        fig.add_trace(
-            go.Candlestick(
-                x=chart_df.index,
-                open=chart_df["Open"],
-                high=chart_df["High"],
-                low=chart_df["Low"],
-                close=chart_df["Close"],
-                name="Price",
-            )
-        )
-
-        # 20 SMA
-        fig.add_trace(
-            go.Scatter(
-                x=chart_df.index,
-                y=chart_df["SMA20"],
-                mode="lines",
-                name="20 SMA",
-                line=dict(color="#FF9900", width=1.5),
-            )
-        )
-
-        fig.update_layout(
-            template="plotly_dark",
-            height=350,
-            margin=dict(l=10, r=10, t=10, b=10),
-            xaxis_rangeslider_visible=False,
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
-            ),
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        # Native lightweight mobile chart rendering
+        st.line_chart(chart_data, color=["#00FFAA", "#FF9900"])
