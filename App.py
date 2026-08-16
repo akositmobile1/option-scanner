@@ -50,6 +50,7 @@ DEFAULT_WATCHLIST = [
     "AMZN",
     "CRWV",
     "NVDA",
+    "CBRS",
     "PLTR",
     "SKHY",
     "ENPH",
