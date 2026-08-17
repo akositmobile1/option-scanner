@@ -78,20 +78,20 @@ def calculate_option_score(row):
     dist_50 = row.get("Dist_50SMA_%", -10)
     
     if 0 <= dist_20 <= 5 and dist_50 > 0:
-        score += 30  # Pullback in uptrend
+        score += 30  # Pullback in structural uptrend
     elif dist_20 > 5 and dist_50 > 0:
-        score += 20  # Strong momentum
+        score += 20  # Strong uptrend momentum
     elif dist_50 < 0:
         score += 0   # Downtrend penalty
 
     # 3. RSI Entry Timing (Max 20 pts)
     rsi = row.get("RSI", 50)
-    if 35 <= rsi <= 48:
-        score += 20  # Ideal oversold dip for CSP
-    elif 48 < rsi <= 60:
+    if 35 <= rsi <= 52:
+        score += 20  # Ideal dip buy for CSP
+    elif 52 < rsi <= 60:
         score += 10  # Neutral
     elif rsi > 65 or rsi < 30:
-        score += 0   # Overbought or severe breakdown
+        score += 0   # Overbought peak or severe breakdown
 
     # 4. Active Signal Match Bonus (Max 10 pts)
     if row.get("Signal") in ["🟢 SELL CSP", "🔴 SELL CC"]:
@@ -103,7 +103,7 @@ def process_single_ticker(ticker, portfolio_size, max_collateral_pct, delta_offs
     try:
         df = yf.download(ticker, period="6mo", interval="1d", progress=False)
         
-        # Require minimum 15 days of trading history (allows recent IPOs)
+        # Requires 15 days minimum (accommodates recent IPOs/listings)
         if df.empty or len(df) < 15:
             return None
 
@@ -112,12 +112,12 @@ def process_single_ticker(ticker, portfolio_size, max_collateral_pct, delta_offs
 
         close = float(df["Close"].iloc[-1])
 
-        # Technical Indicators (14-day RSI base)
+        # Moving Averages & 14-day RSI
         df["20_SMA"] = df["Close"].rolling(20).mean()
         df["50_SMA"] = df["Close"].rolling(50).mean()
         df["RSI"] = calculate_rsi(df["Close"], period=14)
 
-        # Fallbacks for young tickers
+        # Fallbacks for younger assets
         sma20 = float(df["20_SMA"].iloc[-1]) if len(df) >= 20 else close
         sma50 = float(df["50_SMA"].iloc[-1]) if len(df) >= 50 else close
         rsi = float(df["RSI"].iloc[-1]) if not pd.isna(df["RSI"].iloc[-1]) else 50.0
@@ -129,15 +129,20 @@ def process_single_ticker(ticker, portfolio_size, max_collateral_pct, delta_offs
         daily_pct_change = df["Close"].pct_change().abs()
         volatility_est = float(daily_pct_change.tail(14).mean())
 
-        # Signal Engine & Calibrated 3.2x Multiplier
-        if rsi < 48 and close >= sma50:
+        # ==========================================
+        # CALIBRATED SIGNAL ENGINE (ADJUSTED)
+        # ==========================================
+        # CSP Trigger: Shallow dip (RSI < 52) while holding structural support (within 2% of 50-SMA)
+        if rsi < 52 and close >= (sma50 * 0.98):
             signal = "🟢 SELL CSP"
             est_strike = close * (1 - (delta_offset * volatility_est * 15))
             est_premium = close * delta_offset * (volatility_est * 3.2)
-        elif rsi > 62:
+        # CC Trigger: RSI above 60 (Overbought / Momentum Peak)
+        elif rsi >= 60:
             signal = "🔴 SELL CC"
             est_strike = close * (1 + (delta_offset * volatility_est * 15))
             est_premium = close * delta_offset * (volatility_est * 3.2)
+        # WAIT Trigger: Neutral consolidation zone
         else:
             signal = "⚪ WAIT"
             est_strike = close * (1 - (delta_offset * volatility_est * 15))
@@ -170,12 +175,11 @@ def process_single_ticker(ticker, portfolio_size, max_collateral_pct, delta_offs
     except Exception:
         return None
 
-# 60-second Cache TTL forces fresh updates on market moves
+# 60-second Cache TTL ensures fresh updates on market shifts
 @st.cache_data(ttl=60)
 def fetch_and_analyze_data(tickers, portfolio_size, max_collateral_pct, delta_offset, target_dte):
     results = []
     
-    # ThreadPoolExecutor for parallel network requests
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = [
             executor.submit(
