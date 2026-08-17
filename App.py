@@ -42,7 +42,7 @@ delta_offset = st.sidebar.slider("Delta Target (Lower = Safer)", 0.05, 0.30, 0.1
 
 watchlist_input = st.sidebar.text_area(
     "Watchlist Tickers (Comma Separated)",
-    value="TSLA, NVDA, AMD, MSTR, IREN, TMUS, GOOG, AMZN, META, AAPL, COIN, PLTR",
+    value="TSLA, NVDA, AMD, CRWV, NU, SNOW, WDAY, SKHY, NBIS, BABA, MSTR, IREN, TMUS, GOOG, AMZN, META, AAPL, COIN, PLTR",
     height=100
 )
 watchlist = [t.strip().upper() for t in watchlist_input.split(",") if t.strip()]
