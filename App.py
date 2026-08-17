@@ -4,13 +4,17 @@ import streamlit as st
 import yfinance as yf
 
 # ==========================================
-# 1. APP CONFIGURATION & STYLING
+# 1. MUST BE THE VERY FIRST STREAMLIT COMMAND
 # ==========================================
 st.set_page_config(
-    page_title="Options Income Radar", page_layout="wide", initial_sidebar_state="expanded"
+    page_title="Options Income Radar",
+    page_layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# Custom Mobile-Friendly CSS
+# ==========================================
+# 2. ALL OTHER STREAMLIT COMMANDS COME AFTER
+# ==========================================
 st.markdown(
     """
     <style>
@@ -23,17 +27,6 @@ st.markdown(
 )
 
 st.title("⚡ Options Income Radar")
-st.caption(
-    "Targeting $2k-$6k/week via 30-45 DTE Cash-Secured Puts & Covered Calls"
-)
-
-# ==========================================
-# 2. SIDEBAR PARAMETERS
-# ==========================================
-st.sidebar.header("🎯 Strategy Settings")
-
-portfolio_size = st.sidebar.number_input(
-    "Total Portfolio ($)", value=600000, step=25000
 )
 max_collateral_pct = (
     st.sidebar.slider("Max Collateral per Ticker (%)", 5, 30, 20) / 100.0
