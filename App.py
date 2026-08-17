@@ -4,13 +4,16 @@ import streamlit as st
 import yfinance as yf
 
 # ==========================================
-# 1. APP CONFIGURATION (MUST BE FIRST ST COMMAND)
+# 1. SAFE APP CONFIGURATION
 # ==========================================
-st.set_page_config(
-    page_title="Options Income Radar",
-    page_layout="wide",
-    initial_sidebar_state="expanded"
-)
+try:
+    st.set_page_config(
+        page_title="Options Income Radar",
+        page_layout="wide",
+        initial_sidebar_state="expanded"
+    )
+except Exception:
+    pass
 
 # Custom Mobile-Friendly CSS
 st.markdown(
