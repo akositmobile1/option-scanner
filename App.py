@@ -1,10 +1,11 @@
+import concurrent.futures
 import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
 
 # ==========================================
-# 1. SAFE APP CONFIGURATION
+# 1. APP CONFIGURATION & MOBILE LAYOUT
 # ==========================================
 try:
     st.set_page_config(
@@ -15,11 +16,10 @@ try:
 except Exception:
     pass
 
-# Custom Mobile-Friendly CSS
 st.markdown(
     """
     <style>
-    .main { padding: 0rem 0.5rem; }
+    .main { padding: 0.2rem 0.5rem; }
     .stDataFrame { width: 100%; }
     div[data-testid="stMetricValue"] { font-size: 1.2rem; }
     </style>
@@ -47,6 +47,9 @@ watchlist_input = st.sidebar.text_area(
 )
 watchlist = [t.strip().upper() for t in watchlist_input.split(",") if t.strip()]
 
+if st.sidebar.button("🔄 Force Live Data Refresh"):
+    st.cache_data.clear()
+
 # ==========================================
 # 3. TECHNICAL & SCORING CALCULATIONS
 # ==========================================
@@ -70,14 +73,14 @@ def calculate_option_score(row):
     elif ann_roc >= 15:
         score += 15
         
-    # 2. Trend & Moving Average Safety (Max 30 pts)
+    # 2. Moving Average Safety (Max 30 pts)
     dist_20 = row.get("Dist_20SMA_%", -10)
     dist_50 = row.get("Dist_50SMA_%", -10)
     
     if 0 <= dist_20 <= 5 and dist_50 > 0:
-        score += 30  # Perfect pullback in structural uptrend
+        score += 30  # Pullback in uptrend
     elif dist_20 > 5 and dist_50 > 0:
-        score += 20  # Strong uptrend
+        score += 20  # Strong momentum
     elif dist_50 < 0:
         score += 0   # Downtrend penalty
 
@@ -96,86 +99,104 @@ def calculate_option_score(row):
         
     return score
 
-@st.cache_data(ttl=300)
-def fetch_and_analyze_data(tickers):
+def process_single_ticker(ticker, portfolio_size, max_collateral_pct, delta_offset, target_dte):
+    try:
+        df = yf.download(ticker, period="6mo", interval="1d", progress=False)
+        
+        # Require minimum 15 days of trading history (allows recent IPOs)
+        if df.empty or len(df) < 15:
+            return None
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        close = float(df["Close"].iloc[-1])
+
+        # Technical Indicators (14-day RSI base)
+        df["20_SMA"] = df["Close"].rolling(20).mean()
+        df["50_SMA"] = df["Close"].rolling(50).mean()
+        df["RSI"] = calculate_rsi(df["Close"], period=14)
+
+        # Fallbacks for young tickers
+        sma20 = float(df["20_SMA"].iloc[-1]) if len(df) >= 20 else close
+        sma50 = float(df["50_SMA"].iloc[-1]) if len(df) >= 50 else close
+        rsi = float(df["RSI"].iloc[-1]) if not pd.isna(df["RSI"].iloc[-1]) else 50.0
+
+        dist_20 = (((close - sma20) / sma20) * 100) if len(df) >= 20 else 0.0
+        dist_50 = (((close - sma50) / sma50) * 100) if len(df) >= 50 else 0.0
+
+        # Volatility via 14-day ATR average
+        daily_pct_change = df["Close"].pct_change().abs()
+        volatility_est = float(daily_pct_change.tail(14).mean())
+
+        # Signal Engine & Calibrated 3.2x Multiplier
+        if rsi < 48 and close >= sma50:
+            signal = "🟢 SELL CSP"
+            est_strike = close * (1 - (delta_offset * volatility_est * 15))
+            est_premium = close * delta_offset * (volatility_est * 3.2)
+        elif rsi > 62:
+            signal = "🔴 SELL CC"
+            est_strike = close * (1 + (delta_offset * volatility_est * 15))
+            est_premium = close * delta_offset * (volatility_est * 3.2)
+        else:
+            signal = "⚪ WAIT"
+            est_strike = close * (1 - (delta_offset * volatility_est * 15))
+            est_premium = close * delta_offset * (volatility_est * 3.2)
+
+        # Sizing and Annualized Yield
+        max_collateral_per_trade = portfolio_size * max_collateral_pct
+        collateral_req = est_strike * 100
+        contracts = max(1, int(max_collateral_per_trade // collateral_req)) if collateral_req > 0 else 1
+        total_collateral = contracts * collateral_req
+        total_est_credit = contracts * est_premium * 100
+
+        roc_35_days = ((est_premium * 100) / collateral_req) if collateral_req > 0 else 0
+        ann_roc = roc_35_days * (365 / target_dte) * 100
+
+        return {
+            "Ticker": ticker,
+            "Price": close,
+            "Signal": signal,
+            "RSI": rsi,
+            "Dist_20SMA_%": dist_20,
+            "Dist_50SMA_%": dist_50,
+            "Est_Strike": est_strike,
+            "Est_Premium": est_premium,
+            "Contracts": contracts,
+            "Total_Collateral": total_collateral,
+            "Total_Credit": total_est_credit,
+            "Annualized_ROC_%": ann_roc
+        }
+    except Exception:
+        return None
+
+# 60-second Cache TTL forces fresh updates on market moves
+@st.cache_data(ttl=60)
+def fetch_and_analyze_data(tickers, portfolio_size, max_collateral_pct, delta_offset, target_dte):
     results = []
-    max_collateral_per_trade = portfolio_size * max_collateral_pct
-
-    for ticker in tickers:
-        try:
-            df = yf.download(ticker, period="6mo", interval="1d", progress=False)
-            if df.empty or len(df) < 50:
-                continue
-
-            # Handle multi-index columns if returned by yfinance
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-
-            close = float(df["Close"].iloc[-1])
-
-            # Moving Averages & RSI
-            df["20_SMA"] = df["Close"].rolling(20).mean()
-            df["50_SMA"] = df["Close"].rolling(50).mean()
-            df["RSI"] = calculate_rsi(df["Close"])
-
-            sma20 = float(df["20_SMA"].iloc[-1])
-            sma50 = float(df["50_SMA"].iloc[-1])
-            rsi = float(df["RSI"].iloc[-1])
-
-            dist_20 = ((close - sma20) / sma20) * 100
-            dist_50 = ((close - sma50) / sma50) * 100
-
-            # Volatility estimate based on recent daily ATR
-            daily_pct_change = df["Close"].pct_change().abs()
-            volatility_est = float(daily_pct_change.tail(14).mean())
-
-            # Signal Generation & Calibrated Premium Multiplier (3.2x)
-            if rsi < 48 and close >= sma50:
-                signal = "🟢 SELL CSP"
-                est_strike = close * (1 - (delta_offset * volatility_est * 15))
-                est_premium = close * delta_offset * (volatility_est * 3.2)
-            elif rsi > 62:
-                signal = "🔴 SELL CC"
-                est_strike = close * (1 + (delta_offset * volatility_est * 15))
-                est_premium = close * delta_offset * (volatility_est * 3.2)
-            else:
-                signal = "⚪ WAIT"
-                est_strike = close * (1 - (delta_offset * volatility_est * 15))
-                est_premium = close * delta_offset * (volatility_est * 3.2)
-
-            # Contract Sizing & Capital Efficiency
-            collateral_req = est_strike * 100
-            contracts = max(1, int(max_collateral_per_trade // collateral_req)) if collateral_req > 0 else 1
-            total_collateral = contracts * collateral_req
-            total_est_credit = contracts * est_premium * 100
-
-            # Annualized ROC Calculation
-            roc_35_days = ((est_premium * 100) / collateral_req) if collateral_req > 0 else 0
-            ann_roc = roc_35_days * (365 / target_dte) * 100
-
-            results.append({
-                "Ticker": ticker,
-                "Price": close,
-                "Signal": signal,
-                "RSI": rsi,
-                "Dist_20SMA_%": dist_20,
-                "Dist_50SMA_%": dist_50,
-                "Est_Strike": est_strike,
-                "Est_Premium": est_premium,
-                "Contracts": contracts,
-                "Total_Collateral": total_collateral,
-                "Total_Credit": total_est_credit,
-                "Annualized_ROC_%": ann_roc
-            })
-        except Exception:
-            continue
+    
+    # ThreadPoolExecutor for parallel network requests
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [
+            executor.submit(
+                process_single_ticker,
+                ticker,
+                portfolio_size,
+                max_collateral_pct,
+                delta_offset,
+                target_dte
+            ) for ticker in tickers
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            res = future.result()
+            if res is not None:
+                results.append(res)
 
     res_df = pd.DataFrame(results)
     if not res_df.empty:
         res_df["Score"] = res_df.apply(calculate_option_score, axis=1)
         res_df = res_df.sort_values(by="Score", ascending=False).reset_index(drop=True)
         
-        # Assign Rank Badges
         badges = []
         for i in range(len(res_df)):
             if i == 0:
@@ -193,13 +214,18 @@ def fetch_and_analyze_data(tickers):
 # ==========================================
 # 4. MAIN DASHBOARD RENDER
 # ==========================================
-with st.spinner("Scanning market volatility and ranking setups..."):
-    scanner_df = fetch_and_analyze_data(watchlist)
+with st.spinner("Executing parallel scanning engine..."):
+    scanner_df = fetch_and_analyze_data(
+        watchlist,
+        portfolio_size,
+        max_collateral_pct,
+        delta_offset,
+        target_dte
+    )
 
 if scanner_df.empty:
-    st.warning("No ticker data found. Check your watchlist symbols or network.")
+    st.warning("No ticker data loaded. Please verify ticker list or connection.")
 else:
-    # Metrics Summary Row
     active_signals = scanner_df[scanner_df["Signal"] != "⚪ WAIT"]
     col1, col2, col3 = st.columns(3)
     col1.metric("Watchlist Scanned", f"{len(scanner_df)} Tickers")
@@ -232,7 +258,7 @@ else:
     st.divider()
 
     # ==========================================
-    # 5. SINGLE-TICKER LIVE INSPECTOR
+    # 5. SINGLE-TICKER DEEP DIVE & OPTION CHAIN
     # ==========================================
     st.subheader("🔍 Single-Ticker Deep Dive & Live Option Chain")
 
@@ -243,14 +269,12 @@ else:
 
     ticker_row = scanner_df[scanner_df["Ticker"] == selected_ticker].iloc[0]
 
-    # Trade Blueprint Summary Cards
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Target Action", ticker_row["Signal"])
     c2.metric("Target Strike", f"${ticker_row['Est_Strike']:.2f}")
     c3.metric("Max Contracts", f"{ticker_row['Contracts']} (${ticker_row['Total_Collateral']:,.0f} Collateral)")
     c4.metric("Est. Total Credit", f"${ticker_row['Total_Credit']:,.2f}")
 
-    # TradingView Chart Widget
     st.caption(f"Real-Time Technical Chart for {selected_ticker}")
     tradingview_html = f"""
     <div class="tradingview-widget-container" style="height:400px;width:100%;">
@@ -260,7 +284,6 @@ else:
     """
     st.components.v1.html(tradingview_html, height=410)
 
-    # Live Option Chain Fetcher (Single Ticker)
     st.markdown(f"### ⚡ Live Option Chain ({selected_ticker})")
 
     try:
@@ -268,19 +291,21 @@ else:
         expirations = tk.options
 
         if expirations:
-            exp_choice = st.selectbox("Select Live Expiration Date", options=expirations[:6])
+            exp_choice = st.selectbox("Select Expiration Date", options=expirations[:6])
             chain = tk.option_chain(exp_choice)
 
             tab1, tab2 = st.tabs(["Put Option Chain (CSPs)", "Call Option Chain (CCs)"])
 
             with tab1:
                 puts_df = chain.puts[['strike', 'bid', 'ask', 'lastPrice', 'impliedVolatility', 'volume', 'openInterest']].copy()
+                puts_df['midPrice'] = (puts_df['bid'] + puts_df['ask']) / 2.0
                 puts_df['impliedVolatility'] = puts_df['impliedVolatility'] * 100
                 st.dataframe(
-                    puts_df,
+                    puts_df[['strike', 'bid', 'midPrice', 'ask', 'lastPrice', 'impliedVolatility', 'volume', 'openInterest']],
                     column_config={
                         "strike": "Strike ($)",
                         "bid": "Bid ($)",
+                        "midPrice": st.column_config.NumberColumn("Mid ($)", format="$%.2f"),
                         "ask": "Ask ($)",
                         "lastPrice": "Last ($)",
                         "impliedVolatility": st.column_config.NumberColumn("IV", format="%.1f%%"),
@@ -293,12 +318,14 @@ else:
 
             with tab2:
                 calls_df = chain.calls[['strike', 'bid', 'ask', 'lastPrice', 'impliedVolatility', 'volume', 'openInterest']].copy()
+                calls_df['midPrice'] = (calls_df['bid'] + calls_df['ask']) / 2.0
                 calls_df['impliedVolatility'] = calls_df['impliedVolatility'] * 100
                 st.dataframe(
-                    calls_df,
+                    calls_df[['strike', 'bid', 'midPrice', 'ask', 'lastPrice', 'impliedVolatility', 'volume', 'openInterest']],
                     column_config={
                         "strike": "Strike ($)",
                         "bid": "Bid ($)",
+                        "midPrice": st.column_config.NumberColumn("Mid ($)", format="$%.2f"),
                         "ask": "Ask ($)",
                         "lastPrice": "Last ($)",
                         "impliedVolatility": st.column_config.NumberColumn("IV", format="%.1f%%"),
@@ -309,6 +336,6 @@ else:
                     use_container_width=True
                 )
         else:
-            st.info(f"No option chain data found for {selected_ticker}.")
+            st.info(f"No option chain data available for {selected_ticker}.")
     except Exception as e:
-        st.error(f"Could not load live option chain: {e}")
+        st.error(f"Error reading option chain: {e}")
