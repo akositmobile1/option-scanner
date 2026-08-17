@@ -129,19 +129,19 @@ def fetch_and_analyze_data(tickers):
             daily_pct_change = df["Close"].pct_change().abs()
             volatility_est = float(daily_pct_change.tail(14).mean())
 
-            # Signal Generation
+            # Signal Generation & Calibrated Premium Multiplier (3.2x)
             if rsi < 48 and close >= sma50:
                 signal = "🟢 SELL CSP"
                 est_strike = close * (1 - (delta_offset * volatility_est * 15))
-                est_premium = close * delta_offset * (volatility_est * 12)
+                est_premium = close * delta_offset * (volatility_est * 3.2)
             elif rsi > 62:
                 signal = "🔴 SELL CC"
                 est_strike = close * (1 + (delta_offset * volatility_est * 15))
-                est_premium = close * delta_offset * (volatility_est * 12)
+                est_premium = close * delta_offset * (volatility_est * 3.2)
             else:
                 signal = "⚪ WAIT"
                 est_strike = close * (1 - (delta_offset * volatility_est * 15))
-                est_premium = close * delta_offset * (volatility_est * 12)
+                est_premium = close * delta_offset * (volatility_est * 3.2)
 
             # Contract Sizing & Capital Efficiency
             collateral_req = est_strike * 100
