@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from scipy.stats import norm
 from concurrent.futures import ThreadPoolExecutor
 
@@ -11,8 +13,8 @@ from concurrent.futures import ThreadPoolExecutor
 # PAGE CONFIGURATION
 # ==========================================
 st.set_page_config(
-    page_title="7 DTE Options Yield Engine",
-    page_icon="📈",
+    page_title="High-Yield Options & Institutional Flow Engine",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -22,22 +24,68 @@ st.set_page_config(
 # ==========================================
 def calculate_greeks(S, K, T, r, sigma, option_type="put"):
     if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-        return 0.0, 0.0
+        return 0.0
     
     d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
     cdf_d1 = norm.cdf(d1)
-    pdf_d1 = norm.pdf(d1)
     
     if option_type.lower() == "call":
         delta = cdf_d1
     else:
         delta = cdf_d1 - 1.0
         
-    vega = S * pdf_d1 * math.sqrt(T) / 100.0
-    return round(float(delta), 3), round(float(vega), 3)
+    return round(float(delta), 3)
 
 # ==========================================
-# LIVE OPTION CHAIN & MIDPOINT ENGINE
+# INSTITUTIONAL FLOW & GEX ENGINE
+# ==========================================
+def analyze_option_flow_and_walls(ticker_obj, close_price, target_dte):
+    try:
+        expirations = ticker_obj.options
+        if not expirations:
+            return None, None, None, None
+
+        today = datetime.date.today()
+        best_exp = min(expirations, key=lambda x: abs((datetime.datetime.strptime(x, "%Y-%m-%d").date() - today).days - target_dte))
+
+        chain = ticker_obj.option_chain(best_exp)
+        calls = chain.calls
+        puts = chain.puts
+
+        if calls.empty or puts.empty:
+            return None, None, None, None
+
+        # Call Wall (Strike with Max Call Open Interest)
+        call_wall = float(calls.loc[calls['openInterest'].idxmax()]['strike']) if not calls['openInterest'].isna().all() else close_price * 1.05
+        
+        # Put Wall (Strike with Max Put Open Interest)
+        put_wall = float(puts.loc[puts['openInterest'].idxmax()]['strike']) if not puts['openInterest'].isna().all() else close_price * 0.95
+
+        # Max Pain Calculation
+        strikes = sorted(list(set(calls['strike'].tolist() + puts['strike'].tolist())))
+        total_loss = {}
+        
+        for s in strikes:
+            call_loss = calls[calls['strike'] < s].apply(lambda row: (s - row['strike']) * row['openInterest'], axis=1).sum()
+            put_loss = puts[puts['strike'] > s].apply(lambda row: (row['strike'] - s) * row['openInterest'], axis=1).sum()
+            total_loss[s] = call_loss + put_loss
+
+        max_pain = min(total_loss, key=total_loss.get) if total_loss else close_price
+
+        # Merge for visual distribution graph
+        calls_df = calls[['strike', 'openInterest']].rename(columns={'openInterest': 'Call_OI'})
+        puts_df = puts[['strike', 'openInterest']].rename(columns={'openInterest': 'Put_OI'})
+        oi_df = pd.merge(calls_df, puts_df, on='strike', how='outer').fillna(0)
+        
+        # Filter OI chart window around spot price (+/- 25%)
+        oi_df = oi_df[(oi_df['strike'] >= close_price * 0.75) & (oi_df['strike'] <= close_price * 1.25)]
+
+        return call_wall, put_wall, max_pain, oi_df
+    except Exception:
+        return None, None, None, None
+
+# ==========================================
+# LIVE OPTION CHAIN ENGINE
 # ==========================================
 def get_live_option_data(ticker_obj, close_price, opt_type, target_dte, target_delta):
     try:
@@ -46,18 +94,7 @@ def get_live_option_data(ticker_obj, close_price, opt_type, target_dte, target_d
             return None, None, None
 
         today = datetime.date.today()
-        best_exp = None
-        min_diff = 999
-        
-        for exp in expirations:
-            exp_date = datetime.datetime.strptime(exp, "%Y-%m-%d").date()
-            dte = (exp_date - today).days
-            if abs(dte - target_dte) < min_diff and dte > 0:
-                min_diff = abs(dte - target_dte)
-                best_exp = exp
-
-        if not best_exp:
-            best_exp = expirations[0]
+        best_exp = min(expirations, key=lambda x: abs((datetime.datetime.strptime(x, "%Y-%m-%d").date() - today).days - target_dte))
 
         chain_obj = ticker_obj.option_chain(best_exp)
         options = chain_obj.calls if opt_type == "call" else chain_obj.puts
@@ -65,19 +102,9 @@ def get_live_option_data(ticker_obj, close_price, opt_type, target_dte, target_d
         if options.empty:
             return None, None, None
 
-        # Filter OTM options
-        if opt_type == "call":
-            otm_opts = options[options['strike'] >= close_price]
-        else:
-            otm_opts = options[options['strike'] <= close_price]
-
-        if otm_opts.empty:
-            otm_opts = options
-
-        # Target strike selection approximation
         target_strike = close_price * (1 + (target_delta * 0.18)) if opt_type == "call" else close_price * (1 - (target_delta * 0.18))
-        idx = (otm_opts['strike'] - target_strike).abs().idxmin()
-        selected_option = otm_opts.loc[idx]
+        idx = (options['strike'] - target_strike).abs().idxmin()
+        selected_option = options.loc[idx]
 
         strike = float(selected_option['strike'])
         bid = float(selected_option.get('bid', 0.0))
@@ -89,71 +116,19 @@ def get_live_option_data(ticker_obj, close_price, opt_type, target_dte, target_d
         elif last_price > 0:
             midpoint = last_price
         else:
-            midpoint = 0.50
+            midpoint = 1.20
 
         return strike, midpoint, best_exp
     except Exception:
         return None, None, None
 
 # ==========================================
-# 6-MONTH HISTORICAL BACKTESTING ENGINE
-# ==========================================
-def run_6m_backtest(df, opt_type, target_delta=0.18, weeks=26):
-    try:
-        if len(df) < (weeks * 5):
-            return {"Win Rate": "N/A", "Wins": 0, "Losses": 0, "Net PnL": 0.0}
-        
-        weekly_closes = df['Close'].resample('W').last().tail(weeks)
-        wins = 0
-        losses = 0
-        total_pnl = 0.0
-        
-        for i in range(len(weekly_closes) - 1):
-            entry_price = weekly_closes.iloc[i]
-            exit_price = weekly_closes.iloc[i+1]
-            strike_offset = target_delta * 0.25
-            
-            if opt_type == "put":
-                strike = entry_price * (1 - strike_offset)
-                est_credit = entry_price * 0.008  # ~0.8% weekly premium
-                
-                if exit_price <= strike:
-                    losses += 1
-                    # 100% loss management: Stop-loss capped at 2x credit loss
-                    total_pnl -= (est_credit * 1.0) * 100
-                else:
-                    wins += 1
-                    total_pnl += (est_credit * 0.60) * 100
-            else:  # Call
-                strike = entry_price * (1 + strike_offset)
-                est_credit = entry_price * 0.008
-                
-                if exit_price >= strike:
-                    losses += 1
-                    total_pnl -= (est_credit * 1.0) * 100
-                else:
-                    wins += 1
-                    total_pnl += (est_credit * 0.60) * 100
-
-        total_trades = wins + losses
-        win_rate_pct = (wins / total_trades * 100) if total_trades > 0 else 0.0
-        
-        return {
-            "Win Rate": f"{win_rate_pct:.1f}%",
-            "Wins": wins,
-            "Losses": losses,
-            "Net PnL": round(total_pnl, 2)
-        }
-    except Exception:
-        return {"Win Rate": "N/A", "Wins": 0, "Losses": 0, "Net PnL": 0.0}
-
-# ==========================================
-# TICKER SCANNER PROCESSOR
+# SINGLE TICKER SCANNER PROCESSOR
 # ==========================================
 def process_single_ticker(ticker, target_dte, target_delta):
     try:
         data = yf.Ticker(ticker)
-        df = data.history(period="1y")
+        df = data.history(period="6m")
         
         if len(df) < 15:
             return None
@@ -171,13 +146,10 @@ def process_single_ticker(ticker, target_dte, target_delta):
         rsi = float(100 - (100 / (1 + rs)).iloc[-1])
         sma50 = float(df['SMA50'].iloc[-1]) if not pd.isna(df['SMA50'].iloc[-1]) else close
 
-        # Historical Volatility
-        log_returns = np.log(df['Close'] / df['Close'].shift(1))
-        volatility_est = float(log_returns.tail(21).std() * np.sqrt(252))
-        if np.isnan(volatility_est) or volatility_est == 0:
-            volatility_est = 0.25
+        # Institutional Flow Walls
+        call_wall, put_wall, max_pain, oi_df = analyze_option_flow_and_walls(data, close, target_dte)
 
-        # Signal Engine with Daily Drop Guard Rules
+        # Signal Logic
         if (rsi < 52 or daily_change_pct <= -1.5) and close >= (sma50 * 0.98):
             signal = "🟢 SELL CSP"
             opt_type = "put"
@@ -188,41 +160,40 @@ def process_single_ticker(ticker, target_dte, target_delta):
             signal = "⚪ WAIT"
             opt_type = "put"
 
-        # Option Fetching
-        live_strike, live_midpoint, best_exp = get_live_option_data(
-            data, close, opt_type, target_dte, target_delta
-        )
-
+        # Option Details
+        live_strike, live_midpoint, best_exp = get_live_option_data(data, close, opt_type, target_dte, target_delta)
         if live_strike is None:
-            if opt_type == "call":
-                live_strike = close * (1 + (target_delta * volatility_est * (target_dte / 30.0)))
-            else:
-                live_strike = close * (1 - (target_delta * volatility_est * (target_dte / 30.0)))
-            live_midpoint = close * target_delta * (volatility_est * 0.10)
+            live_strike = close * (0.92 if opt_type == "put" else 1.08)
+            live_midpoint = 1.50
             best_exp = f"{target_dte} DTE"
 
-        # Black-Scholes Greeks
-        T_years = max(target_dte, 1) / 365.0
-        delta_val, vega_val = calculate_greeks(
-            S=close, K=live_strike, T=T_years, r=0.045, sigma=volatility_est, option_type=opt_type
-        )
+        premium_per_contract = live_midpoint * 100.0
 
-        # 6-Month Backtest Engine Run
-        backtest_res = run_6m_backtest(df, opt_type, target_delta=target_delta, weeks=26)
+        # Contract Allocation Logic
+        if premium_per_contract >= 350:
+            suggested_contracts = 2
+        elif premium_per_contract >= 150:
+            suggested_contracts = 3
+        else:
+            suggested_contracts = 1
+
+        est_trade_yield = premium_per_contract * suggested_contracts
 
         return {
             "Ticker": ticker,
             "Price": round(close, 2),
-            "Daily Change %": round(daily_change_pct, 2),
-            "RSI (14)": round(rsi, 1),
             "Signal": signal,
             "Target Strike": round(live_strike, 2),
-            "Midpoint ($/sh)": round(live_midpoint, 2),
-            "Credit ($/cntrct)": round(live_midpoint * 100, 2),
-            "6M Win Rate": backtest_res["Win Rate"],
-            "6M Net PnL ($/cntrct)": backtest_res["Net PnL"],
+            "Mid Premium": round(live_midpoint, 2),
+            "Credit / Contract": f"${premium_per_contract:.2f}",
+            "Contracts": suggested_contracts,
+            "Est. Yield ($)": round(est_trade_yield, 2),
+            "Put Wall (Support)": round(put_wall, 2) if put_wall else "N/A",
+            "Call Wall (Resist)": round(call_wall, 2) if call_wall else "N/A",
+            "Max Pain": round(max_pain, 2) if max_pain else "N/A",
             "Expiration": best_exp,
-            "Est. Delta": abs(delta_val)
+            "df": df,
+            "oi_df": oi_df
         }
     except Exception:
         return None
@@ -230,63 +201,124 @@ def process_single_ticker(ticker, target_dte, target_delta):
 def fetch_all_tickers(ticker_list, target_dte, target_delta):
     results = []
     with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [
-            executor.submit(process_single_ticker, ticker, target_dte, target_delta) 
-            for ticker in ticker_list
-        ]
-        for future in futures:
-            res = future.result()
+        futures = [executor.submit(process_single_ticker, t, target_dte, target_delta) for t in ticker_list]
+        for f in futures:
+            res = f.result()
             if res:
                 results.append(res)
     return results
 
 # ==========================================
-# MAIN DASHBOARD INTERFACE
+# DASHBOARD INTERFACE
 # ==========================================
-st.title("🎯 Weekly Options Income Scanner")
-st.caption("Strategy Engine Defaults: 7 DTE • 0.15–0.20 Target Delta • Daily Drop Guard Active")
+st.title("⚡ Institutional Options & Yield Engine")
+st.caption("7 DTE Strategy • Hedge Fund Open Interest Walls • Technical Price Charts")
 
-# Sidebar - Preset Defaults
-st.sidebar.header("Strategy Defaults")
-portfolio_size = st.sidebar.number_input("Portfolio Capital ($)", value=600000, step=25000)
-target_dte = st.sidebar.slider("Days to Expiration (DTE)", min_value=7, max_value=45, value=7, step=1)
-target_delta = st.sidebar.slider("Target Delta", min_value=0.05, max_value=0.30, value=0.18, step=0.01)
+# Sidebar
+st.sidebar.header("Strategy Settings")
+weekly_goal = st.sidebar.number_input("Weekly Goal ($)", value=2000, step=250)
+target_dte = st.sidebar.slider("Target DTE", min_value=7, max_value=30, value=7)
+target_delta = st.sidebar.slider("Target Delta", min_value=0.10, max_value=0.25, value=0.18, step=0.01)
 
-default_watchlist = "GOOG, TMUS, SKHY, NVDA, TSLA, AMD, SPY, QQQ, PLTR, UBER, SOFI"
-user_tickers = st.sidebar.text_area("Watchlist Tickers", value=default_watchlist)
+watchlist_default = "SNOW, SPCS, NBIS, SKHY, NVDA, TSLA, GOOG, AMD, PLTR, UBER"
+user_tickers = st.sidebar.text_area("Watchlist Tickers", value=watchlist_default)
 tickers = [t.strip().upper() for t in user_tickers.split(",") if t.strip()]
 
-# Automatic Run on Load
-if 'scan_data' not in st.session_state or st.sidebar.button("🔄 Refresh Market Scanner"):
-    with st.spinner("Scanning 7 DTE Option Chains & Executing 6M Backtests..."):
+if 'scan_data' not in st.session_state or st.sidebar.button("🔄 Scan Market & Open Interest"):
+    with st.spinner("Analyzing Option Chains, Institutional Open Interest & Price Action..."):
         st.session_state.scan_data = fetch_all_tickers(tickers, target_dte, target_delta)
 
-results_list = st.session_state.scan_data
+results = st.session_state.scan_data
 
-if results_list:
-    df_results = pd.DataFrame(results_list)
+if results:
+    # Convert to Display DataFrame
+    display_data = []
+    for r in results:
+        display_data.append({
+            "Ticker": r["Ticker"],
+            "Price": r["Price"],
+            "Signal": r["Signal"],
+            "Target Strike": r["Target Strike"],
+            "Mid Premium": r["Mid Premium"],
+            "Credit / Contract": r["Credit / Contract"],
+            "Contracts": r["Contracts"],
+            "Est. Yield ($)": r["Est. Yield ($)"],
+            "Put Wall": r["Put Wall (Support)"],
+            "Call Wall": r["Call Wall (Resist)"],
+            "Max Pain": r["Max Pain"],
+            "Expiration": r["Expiration"]
+        })
     
-    csp_count = len(df_results[df_results["Signal"] == "🟢 SELL CSP"])
-    cc_count = len(df_results[df_results["Signal"] == "🔴 SELL CC"])
-    wait_count = len(df_results[df_results["Signal"] == "⚪ WAIT"])
-    
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Active Signals", f"{csp_count + cc_count} / {len(df_results)}")
-    col2.metric("🟢 CSP Opportunities", f"{csp_count} Tickers")
-    col3.metric("🔴 CC Opportunities", f"{cc_count} Tickers")
-    col4.metric("⚪ WAIT / No Action", f"{wait_count} Tickers")
+    df_res = pd.DataFrame(display_data)
+
+    # Portfolio Metrics
+    top_trades = df_res[df_res["Signal"].str.contains("SELL")].head(4)
+    total_projected = top_trades["Est. Yield ($)"].sum()
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Projected Income", f"${total_projected:,.2f}", f"{((total_projected/weekly_goal)*100):.0f}% of $2k Goal")
+    col2.metric("Active Opportunities", f"{len(top_trades)} Trades")
+    col3.metric("Scan Time", datetime.datetime.now().strftime("%H:%M EST"))
 
     st.markdown("---")
-    st.subheader("Weekly 7 DTE Strategy Signals & 6-Month Performance")
-    
-    def highlight_signals(val):
+    st.subheader("📋 Market Signals & Institutional Open Interest Walls")
+
+    def style_table(val):
         if "SELL CSP" in str(val):
             return "background-color: #113824; color: #4EFE96; font-weight: bold;"
         elif "SELL CC" in str(val):
             return "background-color: #4A151B; color: #FF6B6B; font-weight: bold;"
         return "color: #888888;"
 
-    styled_df = df_results.style.map(highlight_signals, subset=["Signal"])
-    st.dataframe(styled_df, use_container_width=True, height=450)
+    styled_df = df_res.style.map(style_table, subset=["Signal"])
+    st.dataframe(styled_df, use_container_width=True, height=380)
+
+    # ==========================================
+    # VISUAL CHARTS & DEEP DIVE SECTION
+    # ==========================================
+    st.markdown("---")
+    st.subheader("📈 Interactive Visual Deep Dive")
+
+    selected_ticker = st.selectbox("Select Ticker to View Price Action & Institutional Open Interest:", [r["Ticker"] for r in results])
+    ticker_data = next((item for item in results if item["Ticker"] == selected_ticker), None)
+
+    if ticker_data:
+        chart_col1, chart_col2 = st.columns(2)
+
+        # CHART 1: Technical Price Chart with Strike Line
+        with chart_col1:
+            st.markdown(f"**{selected_ticker} Price Action vs Target Strike (${ticker_data['Target Strike']})**")
+            df_hist = ticker_data["df"]
+            
+            fig_price = go.Figure()
+            fig_price.add_trace(go.Scatter(x=df_hist.index, y=df_hist['Close'], mode='lines', name='Price', line=dict(color='#00D2FF', width=2)))
+            
+            if 'SMA50' in df_hist.columns:
+                fig_price.add_trace(go.Scatter(x=df_hist.index, y=df_hist['SMA50'], mode='lines', name='50 SMA', line=dict(color='#FFD166', width=1, dash='dot')))
+
+            # Add Target Strike Line
+            fig_price.add_hline(y=ticker_data['Target Strike'], line_dash="dash", line_color="#4EFE96" if "CSP" in ticker_data['Signal'] else "#FF6B6B",
+                                annotation_text=f"Target Strike: ${ticker_data['Target Strike']}", annotation_position="bottom right")
+
+            fig_price.update_layout(template="plotly_dark", height=380, margin=dict(l=20, r=20, t=30, b=20))
+            st.plotly_chart(fig_price, use_container_width=True)
+
+        # CHART 2: Open Interest Distribution (Call Wall vs Put Wall)
+        with chart_col2:
+            st.markdown(f"**{selected_ticker} Option Open Interest (Call Wall vs Put Wall)**")
+            oi_df = ticker_data["oi_df"]
+
+            if oi_df is not None and not oi_df.empty:
+                fig_oi = go.Figure()
+                fig_oi.add_trace(go.Bar(x=oi_df['strike'], y=oi_df['Put_OI'], name='Put OI (Support)', marker_color='#4EFE96'))
+                fig_oi.add_trace(go.Bar(x=oi_df['strike'], y=oi_df['Call_OI'], name='Call OI (Resistance)', marker_color='#FF6B6B'))
+
+                # Highlight Spot Price
+                fig_oi.add_vline(x=ticker_data['Price'], line_dash="solid", line_color="#FFFFFF", annotation_text="Spot Price", annotation_position="top left")
+
+                fig_oi.update_layout(barmode='group', template="plotly_dark", height=380, margin=dict(l=20, r=20, t=30, b=20), xaxis_title="Strike Price", yaxis_title="Open Interest (Contracts)")
+                st.plotly_chart(fig_oi, use_container_width=True)
+            else:
+                st.info("Open Interest distribution chart not available for this ticker.")
 else:
-    st.error("Unable to load market data. Check internet connectivity or yfinance API status.")
+    st.error("Error loading market data.")
