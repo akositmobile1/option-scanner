@@ -1,287 +1,313 @@
+import math
+import datetime
+import numpy as np
+import pandas as pd
 import streamlit as st
 import yfinance as yf
-import pandas as pd
-import numpy as np
-import math
-import plotly.graph_objects as go
-from concurrent.futures import ThreadPoolExecutor
+from scipy.stats import norm
 
 # ==========================================
 # PAGE CONFIGURATION
 # ==========================================
 st.set_page_config(
-    page_title="Portfolio Yield Dashboard",
+    page_title="Options Alpha Scanner",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 # ==========================================
-# BLACK-SCHOLES GREEK ENGINE
+# BLACK-SCHOLES & GREEKS ENGINE
 # ==========================================
-def calculate_greeks(S, K, T, r, sigma, option_type="call"):
-    if T <= 0 or sigma <= 0 or S <= 0:
-        return 0.0, 0.0
-    
+def black_scholes_greeks(S, K, T, r, sigma, option_type="put"):
+    """
+    Calculates Black-Scholes price and Greeks (Delta, Theta, Vega).
+    S: Spot Price, K: Strike Price, T: Time to Expiration in Years
+    r: Risk-Free Rate, sigma: Implied Volatility
+    """
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return {"delta": 0.0, "theta": 0.0, "vega": 0.0}
+
     d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
-    cdf_d1 = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
-    pdf_d1 = (1.0 / math.sqrt(2.0 * math.pi)) * math.exp(-0.5 * d1**2)
-    
-    if option_type.lower() == "call":
-        delta = cdf_d1
-    else:
-        delta = cdf_d1 - 1.0
-        
-    vega = S * pdf_d1 * math.sqrt(T) / 100.0
-    return round(float(delta), 3), round(float(vega), 3)
+    d2 = d1 - sigma * math.sqrt(T)
+
+    if option_type == "call":
+        delta = norm.cdf(d1)
+        theta = (
+            -(S * norm.pdf(d1) * sigma) / (2 * math.sqrt(T))
+            - r * K * math.exp(-r * T) * norm.cdf(d2)
+        ) / 365.0
+    else:  # Put
+        delta = norm.cdf(d1) - 1.0
+        theta = (
+            -(S * norm.pdf(d1) * sigma) / (2 * math.sqrt(T))
+            + r * K * math.exp(-r * T) * norm.cdf(-d2)
+        ) / 365.0
+
+    vega = (S * norm.pdf(d1) * math.sqrt(T)) / 100.0  # 1% move impact
+    return {"delta": delta, "theta": theta, "vega": vega}
+
 
 # ==========================================
-# LIVE OPTION CHAIN & BID-ASK MIDPOINT ENGINE
+# DATA FETCHING & PROCESSING ENGINE
 # ==========================================
-def get_live_option_data(ticker_obj, close_price, opt_type, target_dte, target_delta):
+@st.cache_data(ttl=300)
+def fetch_stock_data(ticker_symbol):
+    """Fetches underlying equity metadata, history, and earnings dates."""
     try:
-        expirations = ticker_obj.expirations
-        if not expirations:
-            return None, None, None
-
-        # Find expiration closest to target_dte
-        target_days = target_dte
-        best_exp = expirations[0]
-        min_diff = 999
-        
-        for exp in expirations:
-            # Calculate DTE roughly from expiration string
-            exp_date = pd.to_datetime(exp)
-            dte = (exp_date - pd.Timestamp.now()).days
-            if abs(dte - target_days) < min_diff and dte > 0:
-                min_diff = abs(dte - target_days)
-                best_exp = exp
-
-        chain = ticker_obj.option_chain(best_exp)
-        options = chain.calls if opt_type == "call" else chain.puts
-
-        if options.empty:
-            return None, None, None
-
-        # Calculate strike closest to target delta target
-        if opt_type == "call":
-            target_strike = close_price * (1 + (target_delta * 0.25 * (target_dte / 30.0)))
-            # Filter OTM calls
-            otm_opts = options[options['strike'] >= close_price]
-        else:
-            target_strike = close_price * (1 - (target_delta * 0.25 * (target_dte / 30.0)))
-            # Filter OTM puts
-            otm_opts = options[options['strike'] <= close_price]
-
-        if otm_opts.empty:
-            otm_opts = options
-
-        # Find closest strike
-        idx = (otm_opts['strike'] - target_strike).abs().idxmin()
-        selected_option = otm_opts.loc[idx]
-
-        strike = float(selected_option['strike'])
-        bid = float(selected_option['bid'])
-        ask = float(selected_option['ask'])
-
-        # Calculate Midpoint
-        if bid > 0 and ask > 0:
-            midpoint = (bid + ask) / 2.0
-        elif selected_option['lastPrice'] > 0:
-            midpoint = float(selected_option['lastPrice'])
-        else:
-            midpoint = 1.0
-
-        return strike, midpoint, best_exp
-    except Exception:
-        return None, None, None
-
-# ==========================================
-# TICKER PROCESSOR
-# ==========================================
-def process_single_ticker(ticker, target_dte=21, target_delta=0.15):
-    try:
-        data = yf.Ticker(ticker)
-        df = data.history(period="1y")
-        
-        if len(df) < 15:
+        ticker = yf.Ticker(ticker_symbol)
+        history = ticker.history(period="1y")
+        if history.empty:
             return None
 
-        close = float(df["Close"].iloc[-1])
-        prev_close = float(df["Close"].iloc[-2]) if len(df) >= 2 else close
-        daily_change_pct = ((close - prev_close) / prev_close) * 100
+        spot_price = history["Close"].iloc[-1]
 
-        # Technical Indicators
-        df['SMA50'] = df['Close'].rolling(window=50).mean()
-        delta_df = df['Close'].diff()
-        gain = (delta_df.where(delta_df > 0, 0)).rolling(window=14).mean()
-        loss = (-delta_df.where(delta_df < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        rsi = float(100 - (100 / (1 + rs)).iloc[-1])
-        sma50 = float(df['SMA50'].iloc[-1]) if not pd.isna(df['SMA50'].iloc[-1]) else close
+        # Calculate Historical Volatility (HV20)
+        log_returns = np.log(history["Close"] / history["Close"].shift(1))
+        hv20 = np.std(log_returns.tail(20)) * np.sqrt(252)
 
-        # Historical Volatility
-        log_returns = np.log(df['Close'] / df['Close'].shift(1))
-        volatility_est = float(log_returns.tail(21).std() * np.sqrt(252))
-        if np.isnan(volatility_est) or volatility_est == 0:
-            volatility_est = 0.25
-
-        # Signal Engine with Daily Drop Guard
-        if (rsi < 52 or daily_change_pct <= -2.0) and close >= (sma50 * 0.98):
-            signal = "🟢 SELL CSP"
-            opt_type = "put"
-        elif rsi >= 60 and daily_change_pct > -1.5:
-            signal = "🔴 SELL CC"
-            opt_type = "call"
-        else:
-            signal = "⚪ WAIT"
-            opt_type = "put"
-
-        # Fetch Live Option Chain Midpoint & Strike
-        live_strike, live_midpoint, best_exp = get_live_option_data(
-            data, close, opt_type, target_dte, target_delta
-        )
-
-        # Fallback to estimated values if option chain is offline/unavailable
-        if live_strike is None:
-            if opt_type == "call":
-                live_strike = close * (1 + (target_delta * volatility_est * (target_dte / 30.0)))
-            else:
-                live_strike = close * (1 - (target_delta * volatility_est * (target_dte / 30.0)))
-            live_midpoint = close * target_delta * (volatility_est * 0.15)
-            best_exp = f"{target_dte} DTE"
-
-        # Black-Scholes Greeks
-        T_years = target_dte / 365.0
-        delta_val, vega_val = calculate_greeks(
-            S=close, K=live_strike, T=T_years, r=0.045, sigma=volatility_est, option_type=opt_type
-        )
+        # Retrieve next earnings date if available
+        next_earnings = "N/A"
+        try:
+            calendar = ticker.calendar
+            if calendar is not None and "Earnings Date" in calendar:
+                next_earnings = calendar["Earnings Date"][0].strftime("%Y-%m-%d")
+            elif isinstance(calendar, pd.DataFrame) and not calendar.empty:
+                next_earnings = pd.to_datetime(calendar.iloc[0, 0]).strftime("%Y-%m-%d")
+        except Exception:
+            pass
 
         return {
-            "Ticker": ticker,
-            "Price": round(close, 2),
-            "Daily Change %": round(daily_change_pct, 2),
-            "RSI (14)": round(rsi, 1),
-            "50-SMA": round(sma50, 2),
-            "Signal": signal,
-            "Target Strike": round(live_strike, 2),
-            "Midpoint Premium ($/sh)": round(live_midpoint, 2),
-            "Contract Credit ($)": round(live_midpoint * 100, 2),
-            "Expiration": best_exp,
-            "Est. Delta": delta_val,
-            "Est. Vega": vega_val,
-            "df_history": df
+            "ticker": ticker,
+            "spot_price": spot_price,
+            "history": history,
+            "hv20": hv20,
+            "next_earnings": next_earnings,
+            "expirations": ticker.expirations,
         }
     except Exception:
         return None
 
+
+def process_option_chain(
+    ticker_data, target_dte_min, target_dte_max, target_delta_max, strategy_type="CSP"
+):
+    """Processes option chains across target DTE windows and filters contracts."""
+    ticker = ticker_data["ticker"]
+    spot_price = ticker_data["spot_price"]
+    expirations = ticker_data["expirations"]
+
+    today = datetime.date.today()
+    opportunities = []
+
+    for exp_str in expirations:
+        exp_date = datetime.datetime.strptime(exp_str, "%Y-%m-%d").date()
+        dte = (exp_date - today).days
+
+        if target_dte_min <= dte <= target_dte_max:
+            try:
+                opt_chain = ticker.option_chain(exp_str)
+                chain = opt_chain.puts if strategy_type == "CSP" else opt_chain.calls
+            except Exception:
+                continue
+
+            T = max(dte, 1) / 365.0
+            risk_free_rate = 0.045  # Assumed 4.5% Treasury baseline
+
+            for _, row in chain.iterrows():
+                strike = row["strike"]
+                bid = row["bid"]
+                ask = row["ask"]
+                iv = row["impliedVolatility"]
+                volume = row["volume"]
+                open_interest = row["openInterest"]
+
+                # Skip illiquid or zero-bid options
+                if bid <= 0.05 or iv <= 0.01:
+                    continue
+
+                mid_price = (bid + ask) / 2.0
+
+                # Compute Greeks
+                greeks = black_scholes_greeks(
+                    spot_price,
+                    strike,
+                    T,
+                    risk_free_rate,
+                    iv,
+                    option_type="put" if strategy_type == "CSP" else "call",
+                )
+                abs_delta = abs(greeks["delta"])
+
+                # Filter contracts by strategy criteria
+                if strategy_type == "CSP":
+                    # OTM Puts only
+                    if strike >= spot_price or abs_delta > target_delta_max:
+                        continue
+                    capital_required = strike * 100
+                    return_on_capital = (mid_price * 100) / capital_required
+                    ann_return = return_on_capital * (365 / dte)
+                    buffer_pct = ((spot_price - strike) / spot_price) * 100
+
+                elif strategy_type == "CC":
+                    # OTM Calls only
+                    if strike <= spot_price or abs_delta > target_delta_max:
+                        continue
+                    capital_required = spot_price * 100
+                    return_on_capital = (mid_price * 100) / capital_required
+                    ann_return = return_on_capital * (365 / dte)
+                    buffer_pct = ((strike - spot_price) / spot_price) * 100
+
+                opportunities.append(
+                    {
+                        "Ticker": ticker_data["ticker"].ticker,
+                        "Spot Price": round(spot_price, 2),
+                        "Expiration": exp_str,
+                        "DTE": dte,
+                        "Strike": strike,
+                        "Buffer (%)": round(buffer_pct, 2),
+                        "Bid": bid,
+                        "Ask": ask,
+                        "Mid Premium": round(mid_price, 2),
+                        "IV (%)": round(iv * 100, 1),
+                        "Delta": round(greeks["delta"], 3),
+                        "Theta": round(greeks["theta"], 3),
+                        "ROC (%)": round(return_on_capital * 100, 2),
+                        "Ann ROC (%)": round(ann_return * 100, 2),
+                        "Volume": int(volume) if pd.notnull(volume) else 0,
+                        "Open Int": int(open_interest) if pd.notnull(open_interest) else 0,
+                        "Next Earnings": ticker_data["next_earnings"],
+                    }
+                )
+
+    return pd.DataFrame(opportunities)
+
+
 # ==========================================
-# PARALLEL DATA FETCHING
+# SIDEBAR CONTROLS
 # ==========================================
-def fetch_all_tickers(ticker_list, target_dte, target_delta):
-    results = []
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [
-            executor.submit(process_single_ticker, ticker, target_dte, target_delta) 
-            for ticker in ticker_list
-        ]
-        for future in futures:
-            res = future.result()
-            if res:
-                results.append(res)
-    return results
+st.sidebar.title("⚙️ Strategy Parameters")
 
-fetch_and_analyze_data = fetch_all_tickers
+tickers_input = st.sidebar.text_input(
+    "Watchlist Tickers (comma-separated)",
+    value="TMUS, TSLA, NVDA, AMD, PLTR, UBER, SOFI",
+)
+
+strategy = st.sidebar.radio(
+    "Option Strategy",
+    options=["Cash-Secured Put (CSP)", "Covered Call (CC)"],
+    index=0,
+)
+strategy_code = "CSP" if strategy == "Cash-Secured Put (CSP)" else "CC"
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Expiration & Delta Controls")
+
+col_dte1, col_dte2 = st.sidebar.columns(2)
+with col_dte1:
+    min_dte = st.number_input("Min DTE", min_value=1, max_value=180, value=20)
+with col_dte2:
+    max_dte = st.number_input("Max DTE", min_value=1, max_value=360, value=50)
+
+max_delta = st.sidebar.slider(
+    "Max Abs Delta",
+    min_value=0.05,
+    max_value=0.50,
+    value=0.30,
+    step=0.01,
+    help="Target contract risk profile. Delta 0.30 is roughly ~70% probability of expiring OTM.",
+)
+
+min_ann_roc = st.sidebar.number_input(
+    "Min Annualized ROC (%)", min_value=0.0, max_value=200.0, value=15.0, step=1.0
+)
 
 # ==========================================
-# UI LAYOUT & DASHBOARD
+# MAIN DASHBOARD INTERFACE
 # ==========================================
-st.title("🎯 Options Yield & Portfolio Scanner")
-st.caption("Live Midpoints, Technical Charts, Daily Drop Guards & Black-Scholes Greeks")
+st.title("📈 High-Yield Options Income Scanner")
+st.caption(
+    "Scan live option chains for optimal Cash-Secured Puts and Covered Calls based on Delta, DTE, and Annualized Return on Capital."
+)
 
-st.sidebar.header("Strategy Controls")
-portfolio_size = st.sidebar.number_input("Portfolio Capital ($)", value=600000, step=25000)
-target_dte = st.sidebar.slider("Days to Expiration (DTE)", min_value=7, max_value=45, value=21, step=1)
-target_delta = st.sidebar.slider("Target Delta", min_value=0.10, max_value=0.30, value=0.15, step=0.01)
+ticker_list = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
-default_watchlist = "GOOG, TMUS, SKHY, NVDA, TSLA, AMD, SPY,SNOW, CRWV, BABA, AMZN, SPCX, AGNC, AAPL, IREN,  QQQ"
-user_tickers = st.sidebar.text_area("Watchlist (Comma Separated)", value=default_watchlist)
-tickers = [t.strip().upper() for t in user_tickers.split(",") if t.strip()]
+if st.sidebar.button("Run Market Scan", type="primary"):
+    all_results = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
-if st.sidebar.button("🔄 Refresh Market Scanner") or 'scan_data' not in st.session_state:
-    with st.spinner("Fetching live option chains, midpoints & technicals..."):
-        st.session_state.scan_data = fetch_all_tickers(tickers, target_dte, target_delta)
+    for idx, ticker_sym in enumerate(ticker_list):
+        status_text.text(f"Fetching option chains for {ticker_sym}...")
+        data = fetch_stock_data(ticker_sym)
 
-results_list = st.session_state.scan_data
+        if data and data["expirations"]:
+            df_opps = process_option_chain(
+                data,
+                target_dte_min=min_dte,
+                target_dte_max=max_dte,
+                target_delta_max=max_delta,
+                strategy_type=strategy_code,
+            )
+            if not df_opps.empty:
+                all_results.append(df_opps)
 
-if results_list:
-    df_results = pd.DataFrame([{k: v for k, v in item.items() if k != 'df_history'} for item in results_list])
-    
-    # Top Metrics Bar
-    csp_count = len(df_results[df_results["Signal"] == "🟢 SELL CSP"])
-    cc_count = len(df_results[df_results["Signal"] == "🔴 SELL CC"])
-    
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Watchlist Count", len(df_results))
-    col2.metric("CSP Opportunities", f"{csp_count} Tickers")
-    col3.metric("CC Opportunities", f"{cc_count} Tickers")
-    col4.metric("Max Position Limit (20%)", f"${portfolio_size * 0.20:,.0f}")
+        progress_bar.progress((idx + 1) / len(ticker_list))
 
-    st.markdown("---")
-    st.subheader("Live Scanner Results")
-    
-    def highlight_signals(val):
-        if val == "🟢 SELL CSP":
-            return "background-color: #113824; color: #4EFE96;"
-        elif val == "🔴 SELL CC":
-            return "background-color: #4A151B; color: #FF6B6B;"
-        return "color: #888888;"
+    status_text.empty()
+    progress_bar.empty()
 
-    styled_df = df_results.style.map(highlight_signals, subset=["Signal"])
-    st.dataframe(styled_df, use_container_width=True, height=350)
+    if all_results:
+        combined_df = pd.concat(all_results, ignore_index=True)
 
-    # Detailed Position Execution & Plotly Chart Section
-    st.markdown("---")
-    st.subheader("Position Execution & Interactive Chart")
-    
-    selected_ticker = st.selectbox("Select Ticker to Analyze", df_results["Ticker"].unique())
-    selected_data = next(item for item in results_list if item["Ticker"] == selected_ticker)
-    
-    pcol1, pcol2, pcol3, pcol4 = st.columns(4)
-    pcol1.metric("Current Price", f"${selected_data['Price']}")
-    pcol2.metric("Target Strike Price", f"${selected_data['Target Strike']}")
-    pcol3.metric("Live Bid-Ask Midpoint", f"${selected_data['Midpoint Premium ($/sh)']:.2f} / sh")
-    pcol4.metric("Total Upfront Credit", f"${selected_data['Contract Credit ($)']:,.2f} / contract")
+        # Apply Minimum Annualized ROC filter
+        filtered_df = combined_df[combined_df["Ann ROC (%)"] >= min_ann_roc]
+        filtered_df = filtered_df.sort_values(by="Ann ROC (%)", ascending=False)
 
-    # Interactive Price & RSI Chart
-    hist_df = selected_data['df_history']
-    
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=hist_df.index,
-        open=hist_df['Open'], high=hist_df['High'],
-        low=hist_df['Low'], close=hist_df['Close'],
-        name="Price"
-    ))
-    fig.add_trace(go.Scatter(
-        x=hist_df.index, y=hist_df['SMA50'],
-        line=dict(color='orange', width=1.5),
-        name="50-Day SMA"
-    ))
-    fig.add_hline(
-        y=selected_data['Target Strike'],
-        line_dash="dash", line_color="green" if "CSP" in selected_data['Signal'] else "red",
-        annotation_text=f"Target Strike: ${selected_data['Target Strike']}"
-    )
-    
-    fig.update_layout(
-        title=f"{selected_ticker} Interactive Technical Chart",
-        template="plotly_dark",
-        height=450,
-        xaxis_rangeslider_visible=False
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
+        # TOP METRICS SUMMARY
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        col_m1.metric("Opportunities Found", len(filtered_df))
+        if not filtered_df.empty:
+            col_m2.metric("Max Ann. ROC", f"{filtered_df['Ann ROC (%)'].max()}%")
+            col_m3.metric("Avg Ann. ROC", f"{round(filtered_df['Ann ROC (%)'].mean(), 1)}%")
+            col_m4.metric("Avg Buffer to Strike", f"{round(filtered_df['Buffer (%)'].mean(), 1)}%")
+
+        st.markdown("---")
+
+        # DISPLAY RESULTS TABLE
+        st.subheader(f"Filtered Results: {strategy}")
+
+        st.dataframe(
+            filtered_df.style.format(
+                {
+                    "Spot Price": "${:.2f}",
+                    "Strike": "${:.2f}",
+                    "Bid": "${:.2f}",
+                    "Ask": "${:.2f}",
+                    "Mid Premium": "${:.2f}",
+                    "Buffer (%)": "{:.2f}%",
+                    "IV (%)": "{:.1f}%",
+                    "Delta": "{:.3f}",
+                    "Theta": "{:.3f}",
+                    "ROC (%)": "{:.2f}%",
+                    "Ann ROC (%)": "{:.2f}%",
+                }
+            ),
+            use_container_width=True,
+            height=450,
+        )
+
+        # EXPORT DATA
+        csv_data = filtered_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="📥 Export Scan Results to CSV",
+            data=csv_data,
+            file_name=f"options_scan_{strategy_code}_{datetime.date.today()}.csv",
+            mime="text/csv",
+        )
+
+    else:
+        st.warning("No option contracts met your criteria across the specified watchlist.")
 
 else:
-    st.warning("No valid ticker data returned. Please verify your watchlist symbols.")
+    st.info("👈 Set your strategy criteria in the sidebar and click **Run Market Scan** to populate opportunities.")
