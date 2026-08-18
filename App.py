@@ -204,7 +204,7 @@ portfolio_size = st.sidebar.number_input("Portfolio Capital ($)", value=600000, 
 target_dte = st.sidebar.slider("Days to Expiration (DTE)", min_value=7, max_value=45, value=21, step=1)
 target_delta = st.sidebar.slider("Target Delta", min_value=0.10, max_value=0.30, value=0.15, step=0.01)
 
-default_watchlist = "GOOG, TMUS, SKHY, NVDA, TSLA, AMD, SPY, QQQ"
+default_watchlist = "GOOG, TMUS, SKHY, NVDA, TSLA, AMD, SPY,SNOW, CRWV, BABA, AMZN, SPCX, AGNC, AAPL, IREN,  QQQ"
 user_tickers = st.sidebar.text_area("Watchlist (Comma Separated)", value=default_watchlist)
 tickers = [t.strip().upper() for t in user_tickers.split(",") if t.strip()]
 
