@@ -1,6 +1,7 @@
 streamlit
-yfinance
+yfinance>=0.2.36
 pandas
 numpy
 scipy
 plotly
+appdirs
