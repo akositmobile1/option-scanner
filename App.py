@@ -32,7 +32,7 @@ weekly_goal = st.sidebar.number_input("Weekly Income Goal ($)", value=2000, step
 target_dte = st.sidebar.slider("Target DTE", 7, 30, 7)
 target_delta = st.sidebar.slider("Target Delta", 0.10, 0.25, 0.18, 0.01)
 
-watchlist_default = "SNOW, NVDA, TSLA, GOOG, AMD, TMUS, PLTR, UBER, SPY, NBIS, HOOD, SPCX, SKHY,  QQQ"
+watchlist_default = "SNOW, NVDA, TSLA, GOOG, AMD, PLTR, UBER, SPY, QQQ"
 user_tickers = st.sidebar.text_area("Watchlist Tickers", value=watchlist_default)
 tickers = [t.strip().upper() for t in user_tickers.split(",") if t.strip()]
 
@@ -44,7 +44,7 @@ scan_button = st.sidebar.button("🔄 Scan Market Data", use_container_width=Tru
 def fetch_chart_rest_api(symbol):
     """Hits Yahoo's direct query API with explicit epoch range to ensure full historical series."""
     end_time = int(datetime.datetime.now().timestamp())
-    start_time = int((datetime.datetime.now() - datetime.timedelta(days=365)).timestamp())
+    start_time = int((datetime.datetime.now() - datetime.timedelta(days=1825)).timestamp()) # 5 Years for ALL view
     
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?period1={start_time}&period2={end_time}&interval=1d"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
@@ -131,7 +131,7 @@ def compute_iv_rank(df_hist):
                     return round(iv_rank, 1)
     except Exception:
         pass
-    return 50.0  # Default neutral rank if data unavailable
+    return 50.0  # Default neutral rank
 
 def process_ticker(ticker, target_dte, target_delta):
     quote = fetch_yahoo_fast(ticker)
@@ -179,7 +179,7 @@ def process_ticker(ticker, target_dte, target_delta):
     # Check Earnings Guardrail
     has_earnings, earn_status = check_upcoming_earnings(ticker, days_ahead=10)
 
-    # Multi-Factor Signal Rules (Price + RSI + IV Rank + Earnings Override)
+    # Multi-Factor Signal Rules
     if has_earnings:
         signal = "⚠️ EARNINGS (WAIT)"
         target_strike = round(close * 0.95, 2)
@@ -296,15 +296,30 @@ if results:
     st.markdown("---")
     st.subheader("📈 Technical Confirmation & Volatility Bounds")
 
-    selected_ticker = st.selectbox("Select Ticker for Detailed Setup Verification:", [r["Ticker"] for r in results])
+    col_select, col_tf = st.columns([2, 1])
+    with col_select:
+        selected_ticker = st.selectbox("Select Ticker for Setup Verification:", [r["Ticker"] for r in results])
+    with col_tf:
+        selected_tf = st.selectbox("Chart Timeframe:", ["30 Days", "6 Months", "1 Year", "ALL"], index=2)
+
     t_data = next((item for item in results if item["Ticker"] == selected_ticker), None)
 
     if t_data:
         try:
             with st.spinner(f"Loading Chart for {selected_ticker}..."):
-                df_chart = fetch_chart_rest_api(selected_ticker)
+                df_chart_raw = fetch_chart_rest_api(selected_ticker)
 
-            if df_chart is not None and not df_chart.empty:
+            if df_chart_raw is not None and not df_chart_raw.empty:
+                # Timeframe Filtering Logic
+                tf_days_map = {"30 Days": 30, "6 Months": 180, "1 Year": 365, "ALL": 1825}
+                days_to_keep = tf_days_map.get(selected_tf, 365)
+                
+                cutoff_date = datetime.datetime.now() - datetime.timedelta(days=days_to_keep)
+                df_chart = df_chart_raw[df_chart_raw.index >= pd.to_datetime(cutoff_date)].copy()
+
+                if df_chart.empty:
+                    df_chart = df_chart_raw.copy()
+
                 close_s = df_chart['Close']
                 high_s = df_chart['High']
                 low_s = df_chart['Low']
@@ -340,9 +355,9 @@ if results:
                 fig = make_subplots(
                     rows=3, cols=1,
                     shared_xaxes=True,
-                    vertical_spacing=0.04,
+                    vertical_spacing=0.06,
                     subplot_titles=(
-                        f"{selected_ticker} Candlesticks, EMAs & Weekly ATR Bounds",
+                        f"<b>{selected_ticker}</b> • Daily Candlesticks & ATR Bounds",
                         "Volume",
                         f"RSI 14 ({round(current_rsi, 1)})"
                     ),
@@ -388,13 +403,23 @@ if results:
 
                 fig.update_layout(
                     template="plotly_dark",
-                    height=680,
+                    height=720,
+                    margin=dict(l=20, r=20, t=80, b=20),
                     xaxis_rangeslider_visible=False,
-                    margin=dict(l=20, r=20, t=40, b=20),
-                    showlegend=True
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    )
                 )
 
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(
+                    fig, 
+                    use_container_width=True, 
+                    config={'scrollZoom': False, 'displayModeBar': True}
+                )
             else:
                 st.error(f"No chart data returned for {selected_ticker}.")
         except Exception as e:
