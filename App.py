@@ -160,21 +160,25 @@ if results:
     if t_data:
         try:
             with st.spinner(f"Loading 6-Month Chart for {selected_ticker}..."):
-                df_chart = yf.Ticker(selected_ticker).history(period="6m")
-                
-                # Flatten MultiIndex columns if present
-                if isinstance(df_chart.columns, pd.MultiIndex):
-                    df_chart.columns = df_chart.columns.get_level_values(0)
+                # Use yf.download to bypass Cloud IP rate limits
+                df_raw = yf.download(selected_ticker, period="6m", interval="1d", progress=False)
 
-            if not df_chart.empty:
-                # Squeeze to 1D Series safely
-                close_s = pd.Series(df_chart['Close'].values.squeeze(), index=df_chart.index)
-                high_s = pd.Series(df_chart['High'].values.squeeze(), index=df_chart.index)
-                low_s = pd.Series(df_chart['Low'].values.squeeze(), index=df_chart.index)
-                open_s = pd.Series(df_chart['Open'].values.squeeze(), index=df_chart.index)
-                vol_s = pd.Series(df_chart['Volume'].values.squeeze(), index=df_chart.index)
+            if not df_raw.empty:
+                # Handle MultiIndex columns if present in newer yfinance versions
+                if isinstance(df_raw.columns, pd.MultiIndex):
+                    df_chart = pd.DataFrame(index=df_raw.index)
+                    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                        df_chart[col] = df_raw[col][selected_ticker].values
+                else:
+                    df_chart = df_raw
 
-                # Indicators
+                close_s = pd.Series(df_chart['Close'].values, index=df_chart.index)
+                high_s = pd.Series(df_chart['High'].values, index=df_chart.index)
+                low_s = pd.Series(df_chart['Low'].values, index=df_chart.index)
+                open_s = pd.Series(df_chart['Open'].values, index=df_chart.index)
+                vol_s = pd.Series(df_chart['Volume'].values, index=df_chart.index)
+
+                # Moving Averages
                 ema20 = close_s.ewm(span=20, adjust=False).mean()
                 ema50 = close_s.ewm(span=50, adjust=False).mean()
 
@@ -186,7 +190,7 @@ if results:
                 rsi_s = 100 - (100 / (1 + rs))
                 current_rsi = float(rsi_s.iloc[-1]) if not pd.isna(rsi_s.iloc[-1]) else 50.0
 
-                # ATR (14) & Expected Move
+                # ATR (14) & Expected Weekly Move
                 high_low = high_s - low_s
                 high_close = np.abs(high_s - close_s.shift())
                 low_close = np.abs(low_s - close_s.shift())
