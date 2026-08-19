@@ -33,7 +33,7 @@ weekly_goal = st.sidebar.number_input("Weekly Income Goal ($)", value=2000, step
 target_dte = st.sidebar.slider("Target DTE", 7, 30, 7)
 target_delta = st.sidebar.slider("Target Delta", 0.10, 0.25, 0.18, 0.01)
 
-watchlist_default = "SNOW, NVDA, TSLA, GOOG, AMD, PLTR, UBER, SPY, QQQ"
+watchlist_default = "SNOW, NVDA, TSLA, GOOG, AMD, PLTR, UBER, SPY, QQQ, NBIS"
 user_tickers = st.sidebar.text_area("Watchlist Tickers", value=watchlist_default)
 tickers = [t.strip().upper() for t in user_tickers.split(",") if t.strip()]
 
@@ -77,24 +77,25 @@ def fetch_chart_rest_api(symbol):
 # ==========================================
 def calculate_black_scholes_delta_strike(current_price, target_delta=0.18, dte=7, iv=0.18, option_type="put"):
     """
-    Calculates exact target strike price corresponding to target Delta
-    using Black-Scholes inversion for 7 DTE options.
+    Calculates exact target strike price corresponding to target Delta using Black-Scholes inversion.
+    Ensures Calls > Current Price and Puts < Current Price.
     """
     t_years = max(dte, 1) / 365.0
-    r = 0.05  # Risk-free interest rate (~5%)
+    r = 0.05  # ~5% risk-free rate
     
     if option_type == "put":
-        d1 = norm.ppf(1.0 - target_delta)
+        d1 = -norm.ppf(target_delta)
+        ln_sk = (d1 * iv * np.sqrt(t_years)) - ((r + 0.5 * (iv ** 2)) * t_years)
+        strike = current_price * np.exp(-ln_sk)
     else:
-        d1 = norm.ppf(target_delta)
-        
-    ln_sk = (d1 * iv * np.sqrt(t_years)) - ((r + 0.5 * (iv ** 2)) * t_years)
-    strike = current_price * np.exp(-ln_sk) if option_type == "put" else current_price * np.exp(ln_sk)
+        d1 = norm.ppf(1.0 - target_delta)
+        ln_sk = (d1 * iv * np.sqrt(t_years)) - ((r + 0.5 * (iv ** 2)) * t_years)
+        strike = current_price * np.exp(ln_sk)
     
     return round(strike, 1)
 
 def get_live_option_quote(symbol, option_type="put", target_delta=0.18, iv_estimate=0.18, dte=7):
-    """Hits live Yahoo chain and matches the calculated Delta strike directly."""
+    """Hits live Yahoo chain and matches calculated Delta strike strictly within OTM bounds."""
     try:
         t = yf.Ticker(symbol)
         expirations = t.options
@@ -104,11 +105,15 @@ def get_live_option_quote(symbol, option_type="put", target_delta=0.18, iv_estim
         current_price = float(t.fast_info.last_price)
         target_date = datetime.datetime.now() + datetime.timedelta(days=dte)
         
-        # Find nearest expiration date to target DTE
         best_exp = min(expirations, key=lambda x: abs((datetime.datetime.strptime(x, "%Y-%m-%d") - target_date).days))
         
-        # Calculate precise Delta strike mathematically
-        calc_strike = calculate_black_scholes_delta_strike(current_price, target_delta=target_delta, dte=dte, iv=iv_estimate, option_type=option_type)
+        calc_strike = calculate_black_scholes_delta_strike(
+            current_price, 
+            target_delta=target_delta, 
+            dte=dte, 
+            iv=iv_estimate, 
+            option_type=option_type
+        )
         
         chain = t.option_chain(best_exp)
         df_opts = chain.puts if option_type == "put" else chain.calls
@@ -116,7 +121,15 @@ def get_live_option_quote(symbol, option_type="put", target_delta=0.18, iv_estim
         if df_opts.empty:
             return calc_strike, round(current_price * 0.003, 2)
 
-        # Match nearest available exchange strike to calculated delta strike
+        # STRICT GUARDRAIL: Filter out ITM options
+        if option_type == "put":
+            df_opts = df_opts[df_opts['strike'] <= current_price]
+        else:
+            df_opts = df_opts[df_opts['strike'] >= current_price]
+
+        if df_opts.empty:
+            return calc_strike, round(current_price * 0.003, 2)
+
         df_opts['strike_diff'] = abs(df_opts['strike'] - calc_strike)
         selected = df_opts.sort_values('strike_diff').iloc[0]
         
@@ -214,10 +227,10 @@ def process_ticker(ticker, target_dte, target_delta):
 
     has_earnings, earn_status = check_upcoming_earnings(ticker, days_ahead=10)
 
-    # Determine direction based on daily momentum
+    # Momentum check for option type
     opt_type = "call" if daily_change_pct >= 1.5 else "put"
     
-    # Live option chain quote with Black-Scholes Delta mapping
+    # Quote matching
     live_strike, live_mid = get_live_option_quote(
         ticker, 
         option_type=opt_type, 
