@@ -38,7 +38,7 @@ tickers = [t.strip().upper() for t in user_tickers.split(",") if t.strip()]
 scan_button = st.sidebar.button("🔄 Scan Market Data", use_container_width=True)
 
 # ==========================================
-# LIGHTWEIGHT YFINANCE FETCH & TECHNICALS
+# LIGHTWEIGHT YFINANCE FETCH
 # ==========================================
 def fetch_yahoo_fast(symbol):
     """Uses fast_info to bypass heavy scraping blocks on Cloud IPs."""
@@ -66,55 +66,11 @@ def process_ticker(ticker, target_dte, target_delta):
     prev_close = quote["prev_close"]
     daily_change_pct = ((close - prev_close) / prev_close) * 100
 
-    # Historical Data for Indicators
-    try:
-        t_obj = yf.Ticker(ticker)
-        df_hist = t_obj.history(period="6m")
-        if isinstance(df_hist.columns, pd.MultiIndex):
-            df_hist = df_hist.xs(ticker, level=1, axis=1)
-
-        if not df_hist.empty and len(df_hist) >= 30:
-            close_s = df_hist['Close']
-            
-            # 1. EMAs
-            df_hist['EMA20'] = close_s.ewm(span=20, adjust=False).mean()
-            df_hist['EMA50'] = close_s.ewm(span=50, adjust=False).mean()
-
-            # 2. RSI (14)
-            delta_df = close_s.diff()
-            gain = (delta_df.where(delta_df > 0, 0)).rolling(window=14).mean()
-            loss = (-delta_df.where(delta_df < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            df_hist['RSI'] = 100 - (100 / (1 + rs))
-            current_rsi = float(df_hist['RSI'].iloc[-1]) if not pd.isna(df_hist['RSI'].iloc[-1]) else 50.0
-
-            # 3. ATR (14) & Expected 5-Day Move
-            high_low = df_hist['High'] - df_hist['Low']
-            high_close = np.abs(df_hist['High'] - close_s.shift())
-            low_close = np.abs(df_hist['Low'] - close_s.shift())
-            tr = np.max(pd.concat([high_low, high_close, low_close], axis=1), axis=1)
-            df_hist['ATR'] = tr.rolling(14).mean()
-            current_atr = float(df_hist['ATR'].iloc[-1]) if not pd.isna(df_hist['ATR'].iloc[-1]) else close * 0.02
-            
-            weekly_move = current_atr * np.sqrt(5)
-            upper_atr_bound = close + (1.2 * weekly_move)
-            lower_atr_bound = close - (1.2 * weekly_move)
-        else:
-            df_hist = None
-            current_rsi = 50.0
-            lower_atr_bound = close * 0.92
-            upper_atr_bound = close * 1.08
-    except Exception:
-        df_hist = None
-        current_rsi = 50.0
-        lower_atr_bound = close * 0.92
-        upper_atr_bound = close * 1.08
-
     # Rules Engine Signal Logic
-    if daily_change_pct <= -1.0 or current_rsi < 45:
+    if daily_change_pct <= -1.0:
         signal = "🟢 SELL CSP"
         target_strike = round(close * (1 - (target_delta * 0.18)), 2)
-    elif daily_change_pct >= 1.5 or current_rsi > 65:
+    elif daily_change_pct >= 1.5:
         signal = "🔴 SELL CC"
         target_strike = round(close * (1 + (target_delta * 0.18)), 2)
     else:
@@ -135,12 +91,55 @@ def process_ticker(ticker, target_dte, target_delta):
         "Est. Yield ($)": round(credit_per_contract, 2),
         "Put Wall": round(close * 0.95, 2),
         "Call Wall": round(close * 1.05, 2),
-        "Max Pain": round(close, 2),
-        "RSI": round(current_rsi, 1),
-        "Lower ATR": round(lower_atr_bound, 2),
-        "Upper ATR": round(upper_atr_bound, 2),
-        "df_hist": df_hist
+        "Max Pain": round(close, 2)
     }
+
+# ==========================================
+# HELPER: ON-DEMAND SINGLE TICKER CHART FETCH
+# ==========================================
+@st.cache_data(ttl=300)
+def fetch_chart_data(symbol):
+    try:
+        df = yf.download(symbol, period="6m", interval="1d", progress=False)
+        if df.empty:
+            return None
+        
+        # Flatten MultiIndex if present
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        close_s = df['Close']
+        
+        # 1. EMAs
+        df['EMA20'] = close_s.ewm(span=20, adjust=False).mean()
+        df['EMA50'] = close_s.ewm(span=50, adjust=False).mean()
+
+        # 2. RSI (14)
+        delta_df = close_s.diff()
+        gain = (delta_df.where(delta_df > 0, 0)).rolling(window=14).mean()
+        loss = (-delta_df.where(delta_df < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+
+        # 3. ATR (14) & Expected 5-Day Move Bounds
+        high_low = df['High'] - df['Low']
+        high_close = np.abs(df['High'] - close_s.shift())
+        low_close = np.abs(df['Low'] - close_s.shift())
+        tr = np.max(pd.concat([high_low, high_close, low_close], axis=1), axis=1)
+        df['ATR'] = tr.rolling(14).mean()
+        
+        last_price = float(close_s.iloc[-1])
+        last_atr = float(df['ATR'].iloc[-1]) if not pd.isna(df['ATR'].iloc[-1]) else last_price * 0.02
+        
+        weekly_move = last_atr * np.sqrt(5)
+        lower_atr = last_price - (1.2 * weekly_move)
+        upper_atr = last_price + (1.2 * weekly_move)
+        
+        last_rsi = float(df['RSI'].iloc[-1]) if not pd.isna(df['RSI'].iloc[-1]) else 50.0
+
+        return df, round(last_rsi, 1), round(lower_atr, 2), round(upper_atr, 2)
+    except Exception:
+        return None, None, None, None
 
 # ==========================================
 # SCANNER EXECUTION
@@ -156,7 +155,7 @@ if scan_button or 'scan_data' not in st.session_state:
                 results.append(res)
             else:
                 failed_tickers.append(t)
-            time.sleep(0.1) # Soft pause between calls
+            time.sleep(0.05)
             
         st.session_state.scan_data = results
         st.session_state.failed_tickers = failed_tickers
@@ -197,7 +196,7 @@ if results:
     st.dataframe(styled_df, use_container_width=True, height=360)
 
     # ==========================================
-    # ADDED: MONDAY TECHNICAL ANALYSIS CHART
+    # ON-DEMAND MONDAY TECHNICAL ANALYSIS CHART
     # ==========================================
     st.markdown("---")
     st.subheader("📈 Technical Confirmation & Volatility Bounds")
@@ -205,71 +204,74 @@ if results:
     selected_ticker = st.selectbox("Select Ticker for Detailed Setup Verification:", [r["Ticker"] for r in results])
     t_data = next((item for item in results if item["Ticker"] == selected_ticker), None)
 
-    if t_data and t_data["df_hist"] is not None:
-        df_chart = t_data["df_hist"]
+    if t_data:
+        with st.spinner(f"Loading 6-Month Chart & Indicators for {selected_ticker}..."):
+            df_chart, current_rsi, lower_atr, upper_atr = fetch_chart_data(selected_ticker)
 
-        fig = make_subplots(
-            rows=3, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.04,
-            subplot_titles=(
-                f"{selected_ticker} Candlesticks, EMAs & Weekly ATR Bounds",
-                "Volume",
-                f"RSI 14 ({t_data['RSI']})"
-            ),
-            row_heights=[0.6, 0.2, 0.2]
-        )
+        if df_chart is not None:
+            fig = make_subplots(
+                rows=3, cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.04,
+                subplot_titles=(
+                    f"{selected_ticker} Candlesticks, EMAs & Weekly ATR Bounds",
+                    "Volume",
+                    f"RSI 14 ({current_rsi if current_rsi else 'N/A'})"
+                ),
+                row_heights=[0.6, 0.2, 0.2]
+            )
 
-        # Panel 1: Price, EMAs, and Target Strike / ATR Bounds
-        fig.add_trace(go.Candlestick(
-            x=df_chart.index,
-            open=df_chart['Open'], high=df_chart['High'],
-            low=df_chart['Low'], close=df_chart['Close'],
-            name="Price"
-        ), row=1, col=1)
+            # Panel 1: Candlesticks & Moving Averages
+            fig.add_trace(go.Candlestick(
+                x=df_chart.index,
+                open=df_chart['Open'], high=df_chart['High'],
+                low=df_chart['Low'], close=df_chart['Close'],
+                name="Price"
+            ), row=1, col=1)
 
-        if 'EMA20' in df_chart.columns:
-            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['EMA20'], mode='lines', name='20 EMA', line=dict(color='#00F0FF', width=1.5)), row=1, col=1)
-        if 'EMA50' in df_chart.columns:
-            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['EMA50'], mode='lines', name='50 EMA', line=dict(color='#FFD166', width=1.5)), row=1, col=1)
+            if 'EMA20' in df_chart.columns:
+                fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['EMA20'], mode='lines', name='20 EMA', line=dict(color='#00F0FF', width=1.5)), row=1, col=1)
+            if 'EMA50' in df_chart.columns:
+                fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['EMA50'], mode='lines', name='50 EMA', line=dict(color='#FFD166', width=1.5)), row=1, col=1)
 
-        # Target Strike Line
-        strike_color = "#4EFE96" if "CSP" in t_data["Signal"] else "#FF6B6B"
-        fig.add_hline(
-            y=t_data["Target Strike"], line_dash="dash", line_color=strike_color, line_width=2,
-            annotation_text=f"Target Strike: ${t_data['Target Strike']:.2f}", annotation_position="top right", row=1, col=1
-        )
+            # Target Strike Overlay
+            strike_color = "#4EFE96" if "CSP" in t_data["Signal"] else "#FF6B6B"
+            fig.add_hline(
+                y=t_data["Target Strike"], line_dash="dash", line_color=strike_color, line_width=2,
+                annotation_text=f"Target Strike: ${t_data['Target Strike']:.2f}", annotation_position="top right", row=1, col=1
+            )
 
-        # Weekly ATR Guard Rails
-        fig.add_hline(
-            y=t_data["Lower ATR"], line_dash="dot", line_color="#22C55E", opacity=0.7,
-            annotation_text=f"ATR Support: ${t_data['Lower ATR']:.2f}", annotation_position="bottom left", row=1, col=1
-        )
-        fig.add_hline(
-            y=t_data["Upper ATR"], line_dash="dot", line_color="#EF4444", opacity=0.7,
-            annotation_text=f"ATR Resist: ${t_data['Upper ATR']:.2f}", annotation_position="top left", row=1, col=1
-        )
+            # Weekly ATR Guard Rails
+            if lower_atr and upper_atr:
+                fig.add_hline(
+                    y=lower_atr, line_dash="dot", line_color="#22C55E", opacity=0.7,
+                    annotation_text=f"ATR Support: ${lower_atr:.2f}", annotation_position="bottom left", row=1, col=1
+                )
+                fig.add_hline(
+                    y=upper_atr, line_dash="dot", line_color="#EF4444", opacity=0.7,
+                    annotation_text=f"ATR Resist: ${upper_atr:.2f}", annotation_position="top left", row=1, col=1
+                )
 
-        # Panel 2: Volume
-        vol_colors = ['#EF4444' if row['Open'] > row['Close'] else '#22C55E' for _, row in df_chart.iterrows()]
-        fig.add_trace(go.Bar(x=df_chart.index, y=df_chart['Volume'], name="Volume", marker_color=vol_colors), row=2, col=1)
+            # Panel 2: Volume
+            vol_colors = ['#EF4444' if row['Open'] > row['Close'] else '#22C55E' for _, row in df_chart.iterrows()]
+            fig.add_trace(go.Bar(x=df_chart.index, y=df_chart['Volume'], name="Volume", marker_color=vol_colors), row=2, col=1)
 
-        # Panel 3: RSI
-        if 'RSI' in df_chart.columns:
-            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['RSI'], mode='lines', name='RSI', line=dict(color='#A855F7', width=1.5)), row=3, col=1)
-            fig.add_hline(y=70, line_dash="dash", line_color="#EF4444", row=3, col=1)
-            fig.add_hline(y=30, line_dash="dash", line_color="#22C55E", row=3, col=1)
+            # Panel 3: RSI
+            if 'RSI' in df_chart.columns:
+                fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['RSI'], mode='lines', name='RSI', line=dict(color='#A855F7', width=1.5)), row=3, col=1)
+                fig.add_hline(y=70, line_dash="dash", line_color="#EF4444", row=3, col=1)
+                fig.add_hline(y=30, line_dash="dash", line_color="#22C55E", row=3, col=1)
 
-        fig.update_layout(
-            template="plotly_dark",
-            height=680,
-            xaxis_rangeslider_visible=False,
-            margin=dict(l=20, r=20, t=40, b=20),
-            showlegend=True
-        )
+            fig.update_layout(
+                template="plotly_dark",
+                height=680,
+                xaxis_rangeslider_visible=False,
+                margin=dict(l=20, r=20, t=40, b=20),
+                showlegend=True
+            )
 
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Chart history currently unavailable for this ticker.")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.error(f"Unable to load historical candles for {selected_ticker}. Try selecting another ticker.")
 else:
     st.info("👈 Click '🔄 Scan Market Data' to trigger fresh Yahoo quote updates.")
