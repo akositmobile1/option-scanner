@@ -32,7 +32,7 @@ weekly_goal = st.sidebar.number_input("Weekly Income Goal ($)", value=2000, step
 target_dte = st.sidebar.slider("Target DTE", 7, 30, 7)
 target_delta = st.sidebar.slider("Target Delta", 0.10, 0.25, 0.18, 0.01)
 
-watchlist_default = "SNOW, NVDA, TSLA, GOOG, AMD, PLTR, UBER, SPY, NBIS, HOOD, SPCX, SKHY,  QQQ"
+watchlist_default = "SNOW, NVDA, TSLA, GOOG, AMD, TMUS, PLTR, UBER, SPY, NBIS, HOOD, SPCX, SKHY,  QQQ"
 user_tickers = st.sidebar.text_area("Watchlist Tickers", value=watchlist_default)
 tickers = [t.strip().upper() for t in user_tickers.split(",") if t.strip()]
 
