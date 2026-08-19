@@ -21,7 +21,7 @@ st.set_page_config(
 )
 
 st.title("⚡ Institutional Options & Yield Engine")
-st.caption("7 DTE Strategy • Multi-Factor Engine (Price + RSI + ATR + IV Rank + Earnings Guard)")
+st.caption("7 DTE Strategy • Live Option Chain Pricing + RSI + ATR + IV Rank + Earnings Guard")
 
 # ==========================================
 # SIDEBAR CONTROLS
@@ -42,12 +42,12 @@ scan_button = st.sidebar.button("🔄 Scan Market Data", use_container_width=Tru
 # DIRECT YAHOO REST API CHART FETCH
 # ==========================================
 def fetch_chart_rest_api(symbol):
-    """Hits Yahoo's direct query API with explicit epoch range to ensure full historical series."""
+    """Hits Yahoo's direct query API for historical daily candles."""
     end_time = int(datetime.datetime.now().timestamp())
-    start_time = int((datetime.datetime.now() - datetime.timedelta(days=1825)).timestamp()) # 5 Years for ALL view
+    start_time = int((datetime.datetime.now() - datetime.timedelta(days=1825)).timestamp())
     
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?period1={start_time}&period2={end_time}&interval=1d"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     
     try:
         r = requests.get(url, headers=headers, timeout=10)
@@ -72,49 +72,69 @@ def fetch_chart_rest_api(symbol):
         return None
 
 # ==========================================
-# LIGHTWEIGHT YFINANCE FETCH (FAST_INFO)
+# LIVE OPTION CHAIN PARSER
 # ==========================================
-def fetch_yahoo_fast(symbol):
-    """Uses fast_info to bypass heavy scraping blocks on Cloud IPs."""
+def get_live_option_quote(symbol, option_type="put", target_pct=0.05):
+    """Fetches real-time option chain data from yfinance for the nearest ~7 DTE expiration."""
     try:
         t = yf.Ticker(symbol)
-        info = t.fast_info
-        current_price = info.last_price
-        prev_close = info.previous_close
+        expirations = t.options
+        if not expirations:
+            return None, None
+            
+        now = datetime.datetime.now()
+        target_date = now + datetime.timedelta(days=7)
+        
+        # Find closest expiration date to 7 DTE
+        best_exp = min(expirations, key=lambda x: abs((datetime.datetime.strptime(x, "%Y-%m-%d") - target_date).days))
+        
+        chain = t.option_chain(best_exp)
+        df_opts = chain.puts if option_type == "put" else chain.calls
+        
+        if df_opts.empty:
+            return None, None
 
-        if current_price and current_price > 0:
-            return {
-                "current": float(current_price),
-                "prev_close": float(prev_close)
-            }
+        current_price = t.fast_info.last_price
+        
+        if option_type == "put":
+            ideal_strike = current_price * (1 - target_pct)
+            # Find strike closest to target Delta proxy
+            df_opts['strike_diff'] = abs(df_opts['strike'] - ideal_strike)
+            selected = df_opts.sort_values('strike_diff').iloc[0]
+        else:
+            ideal_strike = current_price * (1 + target_pct)
+            df_opts['strike_diff'] = abs(df_opts['strike'] - ideal_strike)
+            selected = df_opts.sort_values('strike_diff').iloc[0]
+            
+        bid = selected['bid'] if selected['bid'] > 0 else selected['lastPrice']
+        ask = selected['ask'] if selected['ask'] > 0 else selected['lastPrice']
+        mid = (bid + ask) / 2.0
+        
+        return float(selected['strike']), float(mid)
     except Exception:
-        pass
-    return None
+        return None, None
 
 # ==========================================
-# ADDITIONAL GUARDRAILS (EARNINGS & IV RANK)
+# GUARDRAILS (EARNINGS & IV RANK)
 # ==========================================
 def check_upcoming_earnings(symbol, days_ahead=10):
-    """Checks if an earnings event falls within the next N days."""
     try:
         t = yf.Ticker(symbol)
         cal = t.calendar
-        if cal is not None and not cal.empty:
-            if 'Earnings Date' in cal.index:
-                earn_dates = cal.loc['Earnings Date']
-                now = datetime.datetime.now().date()
-                for d in earn_dates:
-                    if isinstance(d, (datetime.date, datetime.datetime)):
-                        d_date = d.date() if isinstance(d, datetime.datetime) else d
-                        days_diff = (d_date - now).days
-                        if 0 <= days_diff <= days_ahead:
-                            return True, f"Earnings in {days_diff}d"
+        if cal is not None and not cal.empty and 'Earnings Date' in cal.index:
+            earn_dates = cal.loc['Earnings Date']
+            now = datetime.datetime.now().date()
+            for d in earn_dates:
+                if isinstance(d, (datetime.date, datetime.datetime)):
+                    d_date = d.date() if isinstance(d, datetime.datetime) else d
+                    days_diff = (d_date - now).days
+                    if 0 <= days_diff <= days_ahead:
+                        return True, f"Earnings in {days_diff}d"
     except Exception:
         pass
     return False, "Clear"
 
 def compute_iv_rank(df_hist):
-    """Computes 30-day Volatility Rank based on 1-year historical price range."""
     try:
         if df_hist is not None and len(df_hist) >= 30:
             returns = np.log(df_hist['Close'] / df_hist['Close'].shift(1))
@@ -131,18 +151,22 @@ def compute_iv_rank(df_hist):
                     return round(iv_rank, 1)
     except Exception:
         pass
-    return 50.0  # Default neutral rank
+    return 50.0
 
+# ==========================================
+# PROCESS TICKER
+# ==========================================
 def process_ticker(ticker, target_dte, target_delta):
-    quote = fetch_yahoo_fast(ticker)
-    if not quote:
+    t = yf.Ticker(ticker)
+    info = t.fast_info
+    
+    if not info.last_price or info.last_price <= 0:
         return None
 
-    close = quote["current"]
-    prev_close = quote["prev_close"]
+    close = float(info.last_price)
+    prev_close = float(info.previous_close)
     daily_change_pct = ((close - prev_close) / prev_close) * 100
 
-    # Fetch historical daily data for RSI, ATR & IV Rank calculations
     df_hist = fetch_chart_rest_api(ticker)
     
     rsi_val = None
@@ -155,7 +179,6 @@ def process_ticker(ticker, target_dte, target_delta):
         high_s = df_hist['High']
         low_s = df_hist['Low']
 
-        # 14-period RSI Calculation
         delta_df = close_s.diff()
         gain = (delta_df.where(delta_df > 0, 0)).rolling(14).mean()
         loss = (-delta_df.where(delta_df < 0, 0)).rolling(14).mean()
@@ -164,7 +187,6 @@ def process_ticker(ticker, target_dte, target_delta):
         if not pd.isna(rsi_series.iloc[-1]):
             rsi_val = float(rsi_series.iloc[-1])
 
-        # 14-period ATR Calculation & 1.2x Weekly Bounds
         high_low = high_s - low_s
         high_close = np.abs(high_s - close_s.shift())
         low_close = np.abs(low_s - close_s.shift())
@@ -176,36 +198,33 @@ def process_ticker(ticker, target_dte, target_delta):
         lower_atr = round(close - (1.2 * weekly_move), 2)
         upper_atr = round(close + (1.2 * weekly_move), 2)
 
-    # Check Earnings Guardrail
     has_earnings, earn_status = check_upcoming_earnings(ticker, days_ahead=10)
 
-    # Multi-Factor Signal Rules
+    # Determine direction
+    opt_type = "call" if daily_change_pct >= 1.5 else "put"
+    
+    # Try fetching real option chain pricing
+    live_strike, live_mid = get_live_option_quote(ticker, option_type=opt_type, target_pct=(target_delta * 0.3))
+    
+    if live_strike and live_mid and live_mid > 0:
+        target_strike = live_strike
+        est_midpoint = round(live_mid, 2)
+    else:
+        # Fallback to model if chain is closed/unavailable
+        target_strike = round(close * (1 + (target_delta * 0.18)) if opt_type == "call" else close * (1 - (target_delta * 0.18)), 2)
+        est_midpoint = round(close * 0.012, 2)
+
     if has_earnings:
         signal = "⚠️ EARNINGS (WAIT)"
-        target_strike = round(close * 0.95, 2)
     elif iv_rank < 15.0:
         signal = "⚪ LOW IV (WAIT)"
-        target_strike = round(close * 0.95, 2)
-    elif daily_change_pct <= -1.0:
-        if rsi_val is None or rsi_val <= 48:
-            signal = "🟢 SELL CSP"
-            target_strike = round(close * (1 - (target_delta * 0.18)), 2)
-        else:
-            signal = "⚪ WAIT"
-            target_strike = round(close * 0.95, 2)
-    elif daily_change_pct >= 1.5:
-        if rsi_val is None or rsi_val >= 52:
-            signal = "🔴 SELL CC"
-            target_strike = round(close * (1 + (target_delta * 0.18)), 2)
-        else:
-            signal = "⚪ WAIT"
-            target_strike = round(close * 0.95, 2)
+    elif daily_change_pct <= -1.0 and (rsi_val is None or rsi_val <= 48):
+        signal = "🟢 SELL CSP"
+    elif daily_change_pct >= 1.5 and (rsi_val is None or rsi_val >= 52):
+        signal = "🔴 SELL CC"
     else:
         signal = "⚪ WAIT"
-        target_strike = round(close * 0.95, 2)
 
-    # 7 DTE Yield Model
-    est_midpoint = round(close * 0.012, 2)
     credit_per_contract = est_midpoint * 100.0
 
     return {
@@ -227,7 +246,7 @@ def process_ticker(ticker, target_dte, target_delta):
 # SCANNER EXECUTION
 # ==========================================
 if scan_button or 'scan_data' not in st.session_state:
-    with st.spinner("Fetching Live Market Quotes via Yahoo Finance..."):
+    with st.spinner("Fetching Live Market & Option Chains via Yahoo Finance..."):
         results = []
         failed_tickers = []
         
@@ -249,7 +268,7 @@ failed = st.session_state.get('failed_tickers', [])
 # RENDER TABLE
 # ==========================================
 if failed:
-    st.warning(f"⚠️ Could not pull Yahoo data for: {', '.join(failed)}. Symbol may be invalid or halted.")
+    st.warning(f"⚠️ Could not pull Yahoo data for: {', '.join(failed)}.")
 
 if results:
     table_rows = []
@@ -276,7 +295,7 @@ if results:
 
     df_display = pd.DataFrame(table_rows)
 
-    st.subheader("📋 Real-Time Yahoo Market Table")
+    st.subheader("📋 Real-Time Yahoo Option Chain Table")
     
     def highlight_signal(val):
         if "SELL CSP" in str(val):
@@ -310,7 +329,6 @@ if results:
                 df_chart_raw = fetch_chart_rest_api(selected_ticker)
 
             if df_chart_raw is not None and not df_chart_raw.empty:
-                # Timeframe Filtering Logic
                 tf_days_map = {"30 Days": 30, "6 Months": 180, "1 Year": 365, "ALL": 1825}
                 days_to_keep = tf_days_map.get(selected_tf, 365)
                 
@@ -326,11 +344,9 @@ if results:
                 open_s = df_chart['Open']
                 vol_s = df_chart['Volume']
 
-                # EMAs
                 ema20 = close_s.ewm(span=20, adjust=False).mean()
                 ema50 = close_s.ewm(span=50, adjust=False).mean()
 
-                # RSI (14)
                 delta_df = close_s.diff()
                 gain = (delta_df.where(delta_df > 0, 0)).rolling(window=14).mean()
                 loss = (-delta_df.where(delta_df < 0, 0)).rolling(window=14).mean()
@@ -338,7 +354,6 @@ if results:
                 rsi_s = 100 - (100 / (1 + rs))
                 current_rsi = float(rsi_s.iloc[-1]) if not pd.isna(rsi_s.iloc[-1]) else 50.0
 
-                # ATR (14) & Expected Move Bounds
                 high_low = high_s - low_s
                 high_close = np.abs(high_s - close_s.shift())
                 low_close = np.abs(low_s - close_s.shift())
@@ -351,7 +366,6 @@ if results:
                 lower_atr = round(last_price - (1.2 * weekly_move), 2)
                 upper_atr = round(last_price + (1.2 * weekly_move), 2)
 
-                # Plotly 3-Panel Chart Layout
                 fig = make_subplots(
                     rows=3, cols=1,
                     shared_xaxes=True,
@@ -364,7 +378,6 @@ if results:
                     row_heights=[0.6, 0.2, 0.2]
                 )
 
-                # Panel 1: Candlesticks & EMAs
                 fig.add_trace(go.Candlestick(
                     x=df_chart.index,
                     open=open_s, high=high_s,
@@ -375,14 +388,12 @@ if results:
                 fig.add_trace(go.Scatter(x=df_chart.index, y=ema20, mode='lines', name='20 EMA', line=dict(color='#00F0FF', width=1.5)), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_chart.index, y=ema50, mode='lines', name='50 EMA', line=dict(color='#FFD166', width=1.5)), row=1, col=1)
 
-                # Target Strike Horizontal Marker
                 strike_color = "#4EFE96" if "CSP" in t_data["Signal"] else "#FF6B6B"
                 fig.add_hline(
                     y=t_data["Target Strike"], line_dash="dash", line_color=strike_color, line_width=2,
                     annotation_text=f"Target Strike: ${t_data['Target Strike']:.2f}", annotation_position="top right", row=1, col=1
                 )
 
-                # ATR Support / Resistance Lines
                 fig.add_hline(
                     y=lower_atr, line_dash="dot", line_color="#22C55E", opacity=0.7,
                     annotation_text=f"ATR Support: ${lower_atr:.2f}", annotation_position="bottom left", row=1, col=1
@@ -392,11 +403,9 @@ if results:
                     annotation_text=f"ATR Resist: ${upper_atr:.2f}", annotation_position="top left", row=1, col=1
                 )
 
-                # Panel 2: Volume
                 vol_colors = ['#EF4444' if open_s.iloc[i] > close_s.iloc[i] else '#22C55E' for i in range(len(open_s))]
                 fig.add_trace(go.Bar(x=df_chart.index, y=vol_s, name="Volume", marker_color=vol_colors), row=2, col=1)
 
-                # Panel 3: RSI
                 fig.add_trace(go.Scatter(x=df_chart.index, y=rsi_s, mode='lines', name='RSI', line=dict(color='#A855F7', width=1.5)), row=3, col=1)
                 fig.add_hline(y=70, line_dash="dash", line_color="#EF4444", row=3, col=1)
                 fig.add_hline(y=30, line_dash="dash", line_color="#22C55E", row=3, col=1)
