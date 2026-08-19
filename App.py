@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+from scipy.stats import norm
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -21,7 +22,7 @@ st.set_page_config(
 )
 
 st.title("⚡ Institutional Options & Yield Engine")
-st.caption("7 DTE Strategy • Live Option Chain Pricing + RSI + ATR + IV Rank + Earnings Guard")
+st.caption("7 DTE Strategy • Black-Scholes Delta Chain Matcher + RSI + ATR + IV Rank + Earnings Guard")
 
 # ==========================================
 # SIDEBAR CONTROLS
@@ -72,43 +73,56 @@ def fetch_chart_rest_api(symbol):
         return None
 
 # ==========================================
-# LIVE OPTION CHAIN PARSER
+# BLACK-SCHOLES DELTA MAPPING ENGINE
 # ==========================================
-def get_live_option_quote(symbol, option_type="put", target_pct=0.05):
-    """Fetches real-time option chain data from yfinance for the nearest ~7 DTE expiration."""
+def calculate_black_scholes_delta_strike(current_price, target_delta=0.18, dte=7, iv=0.18, option_type="put"):
+    """
+    Calculates exact target strike price corresponding to target Delta
+    using Black-Scholes inversion for 7 DTE options.
+    """
+    t_years = max(dte, 1) / 365.0
+    r = 0.05  # Risk-free interest rate (~5%)
+    
+    if option_type == "put":
+        d1 = norm.ppf(1.0 - target_delta)
+    else:
+        d1 = norm.ppf(target_delta)
+        
+    ln_sk = (d1 * iv * np.sqrt(t_years)) - ((r + 0.5 * (iv ** 2)) * t_years)
+    strike = current_price * np.exp(-ln_sk) if option_type == "put" else current_price * np.exp(ln_sk)
+    
+    return round(strike, 1)
+
+def get_live_option_quote(symbol, option_type="put", target_delta=0.18, iv_estimate=0.18, dte=7):
+    """Hits live Yahoo chain and matches the calculated Delta strike directly."""
     try:
         t = yf.Ticker(symbol)
         expirations = t.options
         if not expirations:
             return None, None
             
-        now = datetime.datetime.now()
-        target_date = now + datetime.timedelta(days=7)
+        current_price = float(t.fast_info.last_price)
+        target_date = datetime.datetime.now() + datetime.timedelta(days=dte)
         
-        # Find closest expiration date to 7 DTE
+        # Find nearest expiration date to target DTE
         best_exp = min(expirations, key=lambda x: abs((datetime.datetime.strptime(x, "%Y-%m-%d") - target_date).days))
+        
+        # Calculate precise Delta strike mathematically
+        calc_strike = calculate_black_scholes_delta_strike(current_price, target_delta=target_delta, dte=dte, iv=iv_estimate, option_type=option_type)
         
         chain = t.option_chain(best_exp)
         df_opts = chain.puts if option_type == "put" else chain.calls
         
         if df_opts.empty:
-            return None, None
+            return calc_strike, round(current_price * 0.003, 2)
 
-        current_price = t.fast_info.last_price
+        # Match nearest available exchange strike to calculated delta strike
+        df_opts['strike_diff'] = abs(df_opts['strike'] - calc_strike)
+        selected = df_opts.sort_values('strike_diff').iloc[0]
         
-        if option_type == "put":
-            ideal_strike = current_price * (1 - target_pct)
-            # Find strike closest to target Delta proxy
-            df_opts['strike_diff'] = abs(df_opts['strike'] - ideal_strike)
-            selected = df_opts.sort_values('strike_diff').iloc[0]
-        else:
-            ideal_strike = current_price * (1 + target_pct)
-            df_opts['strike_diff'] = abs(df_opts['strike'] - ideal_strike)
-            selected = df_opts.sort_values('strike_diff').iloc[0]
-            
-        bid = selected['bid'] if selected['bid'] > 0 else selected['lastPrice']
-        ask = selected['ask'] if selected['ask'] > 0 else selected['lastPrice']
-        mid = (bid + ask) / 2.0
+        bid = float(selected['bid']) if selected['bid'] > 0 else float(selected['lastPrice'])
+        ask = float(selected['ask']) if selected['ask'] > 0 else float(selected['lastPrice'])
+        mid = (bid + ask) / 2.0 if (bid + ask) > 0 else float(selected['lastPrice'])
         
         return float(selected['strike']), float(mid)
     except Exception:
@@ -138,7 +152,7 @@ def compute_iv_rank(df_hist):
     try:
         if df_hist is not None and len(df_hist) >= 30:
             returns = np.log(df_hist['Close'] / df_hist['Close'].shift(1))
-            rolling_vol = returns.rolling(window=20).std() * np.sqrt(252) * 100
+            rolling_vol = returns.rolling(window=20).std() * np.sqrt(252)
             rolling_vol = rolling_vol.dropna()
             
             if len(rolling_vol) > 0:
@@ -148,10 +162,10 @@ def compute_iv_rank(df_hist):
                 
                 if max_vol > min_vol:
                     iv_rank = ((current_vol - min_vol) / (max_vol - min_vol)) * 100
-                    return round(iv_rank, 1)
+                    return round(iv_rank, 1), float(current_vol)
     except Exception:
         pass
-    return 50.0
+    return 50.0, 0.20
 
 # ==========================================
 # PROCESS TICKER
@@ -172,7 +186,7 @@ def process_ticker(ticker, target_dte, target_delta):
     rsi_val = None
     lower_atr = round(close * 0.95, 2)
     upper_atr = round(close * 1.05, 2)
-    iv_rank = compute_iv_rank(df_hist)
+    iv_rank, current_iv = compute_iv_rank(df_hist)
 
     if df_hist is not None and len(df_hist) >= 15:
         close_s = df_hist['Close']
@@ -200,19 +214,24 @@ def process_ticker(ticker, target_dte, target_delta):
 
     has_earnings, earn_status = check_upcoming_earnings(ticker, days_ahead=10)
 
-    # Determine direction
+    # Determine direction based on daily momentum
     opt_type = "call" if daily_change_pct >= 1.5 else "put"
     
-    # Try fetching real option chain pricing
-    live_strike, live_mid = get_live_option_quote(ticker, option_type=opt_type, target_pct=(target_delta * 0.3))
+    # Live option chain quote with Black-Scholes Delta mapping
+    live_strike, live_mid = get_live_option_quote(
+        ticker, 
+        option_type=opt_type, 
+        target_delta=target_delta, 
+        iv_estimate=current_iv if current_iv > 0 else 0.20, 
+        dte=target_dte
+    )
     
     if live_strike and live_mid and live_mid > 0:
         target_strike = live_strike
         est_midpoint = round(live_mid, 2)
     else:
-        # Fallback to model if chain is closed/unavailable
-        target_strike = round(close * (1 + (target_delta * 0.18)) if opt_type == "call" else close * (1 - (target_delta * 0.18)), 2)
-        est_midpoint = round(close * 0.012, 2)
+        target_strike = calculate_black_scholes_delta_strike(close, target_delta=target_delta, dte=target_dte, iv=0.20, option_type=opt_type)
+        est_midpoint = round(close * 0.005, 2)
 
     if has_earnings:
         signal = "⚠️ EARNINGS (WAIT)"
@@ -246,7 +265,7 @@ def process_ticker(ticker, target_dte, target_delta):
 # SCANNER EXECUTION
 # ==========================================
 if scan_button or 'scan_data' not in st.session_state:
-    with st.spinner("Fetching Live Market & Option Chains via Yahoo Finance..."):
+    with st.spinner("Fetching Live Market & Option Chains via Black-Scholes Matching..."):
         results = []
         failed_tickers = []
         
@@ -295,7 +314,7 @@ if results:
 
     df_display = pd.DataFrame(table_rows)
 
-    st.subheader("📋 Real-Time Yahoo Option Chain Table")
+    st.subheader("📋 Real-Time Option Chain Table")
     
     def highlight_signal(val):
         if "SELL CSP" in str(val):
