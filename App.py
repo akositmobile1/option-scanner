@@ -2,13 +2,14 @@ import appdirs as ad
 ad.user_cache_dir = lambda *args: "/tmp"
 
 import time
-import requests
+import datetime
 import pandas as pd
 import streamlit as st
+import yfinance as yf
 import plotly.graph_objects as go
 
 # ==========================================
-# PAGE CONFIGURATION
+# PAGE CONFIG
 # ==========================================
 st.set_page_config(
     page_title="Institutional Options Engine",
@@ -17,47 +18,45 @@ st.set_page_config(
 )
 
 st.title("⚡ Institutional Options & Yield Engine")
-st.caption("7 DTE Strategy • Official Finnhub Live Feed • Institutional Overlays")
+st.caption("7 DTE Strategy • Fast-Info Yahoo Feed • Technical Overlays")
 
 # ==========================================
 # SIDEBAR CONTROLS
 # ==========================================
 st.sidebar.header("⚙️ Strategy Settings")
 
-DEFAULT_FINNHUB_KEY = "Da2faihr01qmq2q9ol50"
-api_key = st.sidebar.text_input("Finnhub API Key", value=DEFAULT_FINNHUB_KEY, type="password")
-
 weekly_goal = st.sidebar.number_input("Weekly Income Goal ($)", value=2000, step=250)
 target_dte = st.sidebar.slider("Target DTE", 7, 30, 7)
 target_delta = st.sidebar.slider("Target Delta", 0.10, 0.25, 0.18, 0.01)
 
-# Cleaned default watchlist with valid, high-volume tickers
 watchlist_default = "SNOW, NVDA, TSLA, GOOG, AMD, PLTR, UBER, SPY, QQQ"
 user_tickers = st.sidebar.text_area("Watchlist Tickers", value=watchlist_default)
 tickers = [t.strip().upper() for t in user_tickers.split(",") if t.strip()]
 
-scan_button = st.sidebar.button("🔄 Scan Live Market Data", use_container_width=True)
+scan_button = st.sidebar.button("🔄 Scan Market Data", use_container_width=True)
 
 # ==========================================
-# LIVE DATA FETCHING
+# LIGHTWEIGHT YFINANCE FETCH (FAST_INFO)
 # ==========================================
-def fetch_finnhub_quote(symbol, token):
-    url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={token}"
+def fetch_yahoo_fast(symbol):
+    """Uses fast_info to bypass heavy scraping blocks on Cloud IPs."""
     try:
-        res = requests.get(url, timeout=5)
-        if res.status_code == 200:
-            data = res.json()
-            if "c" in data and data["c"] > 0:
-                return {
-                    "current": float(data["c"]),
-                    "prev_close": float(data["pc"])
-                }
+        t = yf.Ticker(symbol)
+        info = t.fast_info
+        current_price = info.last_price
+        prev_close = info.previous_close
+
+        if current_price and current_price > 0:
+            return {
+                "current": float(current_price),
+                "prev_close": float(prev_close)
+            }
     except Exception:
         pass
     return None
 
-def process_ticker(ticker, token, target_dte, target_delta):
-    quote = fetch_finnhub_quote(ticker, token)
+def process_ticker(ticker, target_dte, target_delta):
+    quote = fetch_yahoo_fast(ticker)
     if not quote:
         return None
 
@@ -65,6 +64,7 @@ def process_ticker(ticker, token, target_dte, target_delta):
     prev_close = quote["prev_close"]
     daily_change_pct = ((close - prev_close) / prev_close) * 100
 
+    # Rules Engine Signal Logic
     if daily_change_pct <= -1.0:
         signal = "🟢 SELL CSP"
         target_strike = round(close * (1 - (target_delta * 0.18)), 2)
@@ -75,6 +75,7 @@ def process_ticker(ticker, token, target_dte, target_delta):
         signal = "⚪ WAIT"
         target_strike = round(close * 0.95, 2)
 
+    # 7 DTE Delta/Yield Formula
     est_midpoint = round(close * 0.012, 2)
     credit_per_contract = est_midpoint * 100.0
 
@@ -95,17 +96,17 @@ def process_ticker(ticker, token, target_dte, target_delta):
 # SCANNER EXECUTION
 # ==========================================
 if scan_button or 'scan_data' not in st.session_state:
-    with st.spinner("Fetching Live Quotes from Finnhub API..."):
+    with st.spinner("Fetching Live Market Quotes via Yahoo Finance..."):
         results = []
         failed_tickers = []
         
         for t in tickers:
-            res = process_ticker(t, api_key, target_dte, target_delta)
+            res = process_ticker(t, target_dte, target_delta)
             if res:
                 results.append(res)
             else:
                 failed_tickers.append(t)
-            time.sleep(0.1)
+            time.sleep(0.1) # Soft pause between calls
             
         st.session_state.scan_data = results
         st.session_state.failed_tickers = failed_tickers
@@ -114,10 +115,10 @@ results = st.session_state.get('scan_data', [])
 failed = st.session_state.get('failed_tickers', [])
 
 # ==========================================
-# RENDER LOGIC
+# RENDER TABLE
 # ==========================================
 if failed:
-    st.warning(f"⚠️ Could not fetch data for: {', '.join(failed)}. Verify these ticker symbols are valid.")
+    st.warning(f"⚠️ Could not pull Yahoo data for: {', '.join(failed)}. Symbol may be invalid or halted.")
 
 if results:
     df_display = pd.DataFrame([{
@@ -133,7 +134,7 @@ if results:
         "Max Pain": f"${r['Max Pain']:.2f}"
     } for r in results])
 
-    st.subheader("📋 Real-Time Institutional Options Table")
+    st.subheader("📋 Real-Time Yahoo Market Table")
     
     def highlight_signal(val):
         if "SELL CSP" in str(val):
@@ -144,3 +145,5 @@ if results:
 
     styled_df = df_display.style.map(highlight_signal, subset=["Signal"])
     st.dataframe(styled_df, use_container_width=True, height=400)
+else:
+    st.info("👈 Click '🔄 Scan Market Data' to trigger fresh Yahoo quote updates.")
