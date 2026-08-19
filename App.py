@@ -21,7 +21,7 @@ st.set_page_config(
 )
 
 st.title("⚡ Institutional Options & Yield Engine")
-st.caption("7 DTE Strategy • Fast-Info Yahoo Feed • Technical Overlays")
+st.caption("7 DTE Strategy • Multi-Factor Engine (Price + RSI + ATR) • Fast-Info Yahoo Feed")
 
 # ==========================================
 # SIDEBAR CONTROLS
@@ -32,68 +32,11 @@ weekly_goal = st.sidebar.number_input("Weekly Income Goal ($)", value=2000, step
 target_dte = st.sidebar.slider("Target DTE", 7, 30, 7)
 target_delta = st.sidebar.slider("Target Delta", 0.10, 0.25, 0.18, 0.01)
 
-watchlist_default = "SNOW, NBIS, IREN, SPCX, RDDT, SKHY, CRBS,  NVDA, TSLA, GOOG, AMD, PLTR, UBER, SPY, QQQ"
+watchlist_default = "SNOW, NVDA, TSLA, GOOG, AMD, PLTR, UBER, SPY, QQQ"
 user_tickers = st.sidebar.text_area("Watchlist Tickers", value=watchlist_default)
 tickers = [t.strip().upper() for t in user_tickers.split(",") if t.strip()]
 
 scan_button = st.sidebar.button("🔄 Scan Market Data", use_container_width=True)
-
-# ==========================================
-# LIGHTWEIGHT YFINANCE FETCH (FAST_INFO)
-# ==========================================
-def fetch_yahoo_fast(symbol):
-    """Uses fast_info to bypass heavy scraping blocks on Cloud IPs."""
-    try:
-        t = yf.Ticker(symbol)
-        info = t.fast_info
-        current_price = info.last_price
-        prev_close = info.previous_close
-
-        if current_price and current_price > 0:
-            return {
-                "current": float(current_price),
-                "prev_close": float(prev_close)
-            }
-    except Exception:
-        pass
-    return None
-
-def process_ticker(ticker, target_dte, target_delta):
-    quote = fetch_yahoo_fast(ticker)
-    if not quote:
-        return None
-
-    close = quote["current"]
-    prev_close = quote["prev_close"]
-    daily_change_pct = ((close - prev_close) / prev_close) * 100
-
-    # Rules Engine Signal Logic
-    if daily_change_pct <= -1.0:
-        signal = "🟢 SELL CSP"
-        target_strike = round(close * (1 - (target_delta * 0.18)), 2)
-    elif daily_change_pct >= 1.5:
-        signal = "🔴 SELL CC"
-        target_strike = round(close * (1 + (target_delta * 0.18)), 2)
-    else:
-        signal = "⚪ WAIT"
-        target_strike = round(close * 0.95, 2)
-
-    # 7 DTE Delta/Yield Formula
-    est_midpoint = round(close * 0.012, 2)
-    credit_per_contract = est_midpoint * 100.0
-
-    return {
-        "Ticker": ticker,
-        "Price": round(close, 2),
-        "Signal": signal,
-        "Target Strike": target_strike,
-        "Mid Premium": est_midpoint,
-        "Credit / Contract": f"${credit_per_contract:.2f}",
-        "Est. Yield ($)": round(credit_per_contract, 2),
-        "Put Wall": round(close * 0.95, 2),
-        "Call Wall": round(close * 1.05, 2),
-        "Max Pain": round(close, 2)
-    }
 
 # ==========================================
 # DIRECT YAHOO REST API CHART FETCH (WITH EPOCH TIME RANGE)
@@ -129,6 +72,96 @@ def fetch_chart_rest_api(symbol):
         return None
 
 # ==========================================
+# LIGHTWEIGHT YFINANCE FETCH (FAST_INFO)
+# ==========================================
+def fetch_yahoo_fast(symbol):
+    """Uses fast_info to bypass heavy scraping blocks on Cloud IPs."""
+    try:
+        t = yf.Ticker(symbol)
+        info = t.fast_info
+        current_price = info.last_price
+        prev_close = info.previous_close
+
+        if current_price and current_price > 0:
+            return {
+                "current": float(current_price),
+                "prev_close": float(prev_close)
+            }
+    except Exception:
+        pass
+    return None
+
+def process_ticker(ticker, target_dte, target_delta):
+    quote = fetch_yahoo_fast(ticker)
+    if not quote:
+        return None
+
+    close = quote["current"]
+    prev_close = quote["prev_close"]
+    daily_change_pct = ((close - prev_close) / prev_close) * 100
+
+    # Fetch historical daily data for RSI & ATR calculations
+    df_hist = fetch_chart_rest_api(ticker)
+    
+    rsi_val = 50.0
+    lower_atr = round(close * 0.95, 2)
+    upper_atr = round(close * 1.05, 2)
+
+    if df_hist is not None and len(df_hist) >= 15:
+        close_s = df_hist['Close']
+        high_s = df_hist['High']
+        low_s = df_hist['Low']
+
+        # 14-period RSI Calculation
+        delta_df = close_s.diff()
+        gain = (delta_df.where(delta_df > 0, 0)).rolling(14).mean()
+        loss = (-delta_df.where(delta_df < 0, 0)).rolling(14).mean()
+        rs = gain / loss
+        rsi_series = 100 - (100 / (1 + rs))
+        if not pd.isna(rsi_series.iloc[-1]):
+            rsi_val = float(rsi_series.iloc[-1])
+
+        # 14-period ATR Calculation & 1.2x Weekly Bounds
+        high_low = high_s - low_s
+        high_close = np.abs(high_s - close_s.shift())
+        low_close = np.abs(low_s - close_s.shift())
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        atr_s = tr.rolling(14).mean()
+        
+        last_atr = float(atr_s.iloc[-1]) if not pd.isna(atr_s.iloc[-1]) else close * 0.02
+        weekly_move = last_atr * np.sqrt(5)
+        lower_atr = round(close - (1.2 * weekly_move), 2)
+        upper_atr = round(close + (1.2 * weekly_move), 2)
+
+    # Multi-Factor Rules Engine (Price % Change + RSI Confirmation Filter)
+    if daily_change_pct <= -1.0 and rsi_val <= 45:
+        signal = "🟢 SELL CSP"
+        target_strike = round(close * (1 - (target_delta * 0.18)), 2)
+    elif daily_change_pct >= 1.5 and rsi_val >= 55:
+        signal = "🔴 SELL CC"
+        target_strike = round(close * (1 + (target_delta * 0.18)), 2)
+    else:
+        signal = "⚪ WAIT"
+        target_strike = round(close * 0.95, 2)
+
+    # 7 DTE Delta/Yield Formula
+    est_midpoint = round(close * 0.012, 2)
+    credit_per_contract = est_midpoint * 100.0
+
+    return {
+        "Ticker": ticker,
+        "Price": round(close, 2),
+        "Signal": signal,
+        "Target Strike": target_strike,
+        "Mid Premium": est_midpoint,
+        "Credit / Contract": f"${credit_per_contract:.2f}",
+        "Est. Yield ($)": round(credit_per_contract, 2),
+        "Put Wall": lower_atr,   # Dynamic ATR support level
+        "Call Wall": upper_atr,  # Dynamic ATR resistance level
+        "Max Pain": round(close, 2)
+    }
+
+# ==========================================
 # SCANNER EXECUTION
 # ==========================================
 if scan_button or 'scan_data' not in st.session_state:
@@ -142,7 +175,7 @@ if scan_button or 'scan_data' not in st.session_state:
                 results.append(res)
             else:
                 failed_tickers.append(t)
-            time.sleep(0.1) # Soft pause between calls
+            time.sleep(0.1)
             
         st.session_state.scan_data = results
         st.session_state.failed_tickers = failed_tickers
@@ -212,7 +245,7 @@ if results:
                 open_s = df_chart['Open']
                 vol_s = df_chart['Volume']
 
-                # Indicators
+                # EMAs
                 ema20 = close_s.ewm(span=20, adjust=False).mean()
                 ema50 = close_s.ewm(span=50, adjust=False).mean()
 
@@ -224,7 +257,7 @@ if results:
                 rsi_s = 100 - (100 / (1 + rs))
                 current_rsi = float(rsi_s.iloc[-1]) if not pd.isna(rsi_s.iloc[-1]) else 50.0
 
-                # ATR (14) & Expected Move
+                # ATR (14) & Expected Move Bounds
                 high_low = high_s - low_s
                 high_close = np.abs(high_s - close_s.shift())
                 low_close = np.abs(low_s - close_s.shift())
@@ -237,7 +270,7 @@ if results:
                 lower_atr = round(last_price - (1.2 * weekly_move), 2)
                 upper_atr = round(last_price + (1.2 * weekly_move), 2)
 
-                # Plotly 3-Panel Subplot
+                # Plotly 3-Panel Chart Layout
                 fig = make_subplots(
                     rows=3, cols=1,
                     shared_xaxes=True,
@@ -261,14 +294,14 @@ if results:
                 fig.add_trace(go.Scatter(x=df_chart.index, y=ema20, mode='lines', name='20 EMA', line=dict(color='#00F0FF', width=1.5)), row=1, col=1)
                 fig.add_trace(go.Scatter(x=df_chart.index, y=ema50, mode='lines', name='50 EMA', line=dict(color='#FFD166', width=1.5)), row=1, col=1)
 
-                # Target Strike Line
+                # Target Strike Horizontal Marker
                 strike_color = "#4EFE96" if "CSP" in t_data["Signal"] else "#FF6B6B"
                 fig.add_hline(
                     y=t_data["Target Strike"], line_dash="dash", line_color=strike_color, line_width=2,
                     annotation_text=f"Target Strike: ${t_data['Target Strike']:.2f}", annotation_position="top right", row=1, col=1
                 )
 
-                # ATR Support / Resistance
+                # ATR Support / Resistance Lines
                 fig.add_hline(
                     y=lower_atr, line_dash="dot", line_color="#22C55E", opacity=0.7,
                     annotation_text=f"ATR Support: ${lower_atr:.2f}", annotation_position="bottom left", row=1, col=1
