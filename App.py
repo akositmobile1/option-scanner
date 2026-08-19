@@ -3,6 +3,7 @@ ad.user_cache_dir = lambda *args: "/tmp"
 
 import time
 import datetime
+import requests
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -95,6 +96,36 @@ def process_ticker(ticker, target_dte, target_delta):
     }
 
 # ==========================================
+# DIRECT YAHOO REST API CHART FETCH (NO YFINANCE SCRAPER BLOCK)
+# ==========================================
+def fetch_chart_rest_api(symbol):
+    """Hits Yahoo's direct query API to bypass Cloud IP blocks."""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=6m&interval=1d"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
+    try:
+        r = requests.get(url, headers=headers, timeout=5)
+        if r.status_code != 200:
+            return None
+            
+        data = r.json()
+        result = data['chart']['result'][0]
+        timestamps = result['timestamp']
+        indicators = result['indicators']['quote'][0]
+        
+        df = pd.DataFrame({
+            'Open': indicators['open'],
+            'High': indicators['high'],
+            'Low': indicators['low'],
+            'Close': indicators['close'],
+            'Volume': indicators['volume']
+        }, index=pd.to_datetime(timestamps, unit='s'))
+        
+        return df.dropna()
+    except Exception:
+        return None
+
+# ==========================================
 # SCANNER EXECUTION
 # ==========================================
 if scan_button or 'scan_data' not in st.session_state:
@@ -160,25 +191,16 @@ if results:
     if t_data:
         try:
             with st.spinner(f"Loading 6-Month Chart for {selected_ticker}..."):
-                # Use yf.download to bypass Cloud IP rate limits
-                df_raw = yf.download(selected_ticker, period="6m", interval="1d", progress=False)
+                df_chart = fetch_chart_rest_api(selected_ticker)
 
-            if not df_raw.empty:
-                # Handle MultiIndex columns if present in newer yfinance versions
-                if isinstance(df_raw.columns, pd.MultiIndex):
-                    df_chart = pd.DataFrame(index=df_raw.index)
-                    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-                        df_chart[col] = df_raw[col][selected_ticker].values
-                else:
-                    df_chart = df_raw
+            if df_chart is not None and not df_chart.empty:
+                close_s = df_chart['Close']
+                high_s = df_chart['High']
+                low_s = df_chart['Low']
+                open_s = df_chart['Open']
+                vol_s = df_chart['Volume']
 
-                close_s = pd.Series(df_chart['Close'].values, index=df_chart.index)
-                high_s = pd.Series(df_chart['High'].values, index=df_chart.index)
-                low_s = pd.Series(df_chart['Low'].values, index=df_chart.index)
-                open_s = pd.Series(df_chart['Open'].values, index=df_chart.index)
-                vol_s = pd.Series(df_chart['Volume'].values, index=df_chart.index)
-
-                # Moving Averages
+                # Indicators
                 ema20 = close_s.ewm(span=20, adjust=False).mean()
                 ema50 = close_s.ewm(span=50, adjust=False).mean()
 
@@ -190,7 +212,7 @@ if results:
                 rsi_s = 100 - (100 / (1 + rs))
                 current_rsi = float(rsi_s.iloc[-1]) if not pd.isna(rsi_s.iloc[-1]) else 50.0
 
-                # ATR (14) & Expected Weekly Move
+                # ATR (14) & Expected Move
                 high_low = high_s - low_s
                 high_close = np.abs(high_s - close_s.shift())
                 low_close = np.abs(low_s - close_s.shift())
