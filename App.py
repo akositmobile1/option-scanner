@@ -95,16 +95,22 @@ def process_ticker(ticker, target_dte, target_delta):
         "Max Pain": round(close, 2)
     }
 
+import datetime
+
 # ==========================================
-# DIRECT YAHOO REST API CHART FETCH (NO YFINANCE SCRAPER BLOCK)
+# DIRECT YAHOO REST API CHART FETCH (FIXED FOR FULL HISTORY)
 # ==========================================
 def fetch_chart_rest_api(symbol):
-    """Hits Yahoo's direct query API to bypass Cloud IP blocks."""
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=6m&interval=1d"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    """Hits Yahoo's direct query API with explicit timestamps for historical series."""
+    end_time = int(datetime.datetime.now().timestamp())
+    start_time = int((datetime.datetime.now() - datetime.timedelta(days=365)).timestamp())
+    
+    # Using period1 and period2 forces Yahoo to return the full historical sequence
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?period1={start_time}&period2={end_time}&interval=1d"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     
     try:
-        r = requests.get(url, headers=headers, timeout=5)
+        r = requests.get(url, headers=headers, timeout=10)
         if r.status_code != 200:
             return None
             
