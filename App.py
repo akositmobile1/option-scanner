@@ -3,7 +3,6 @@ ad.user_cache_dir = lambda *args: "/tmp"
 
 import time
 import requests
-import datetime
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
@@ -25,7 +24,6 @@ st.caption("7 DTE Strategy • Official Finnhub Live Feed • Institutional Over
 # ==========================================
 st.sidebar.header("⚙️ Strategy Settings")
 
-# Pre-populated with your Finnhub API key
 DEFAULT_FINNHUB_KEY = "Da2faihr01qmq2q9ol50"
 api_key = st.sidebar.text_input("Finnhub API Key", value=DEFAULT_FINNHUB_KEY, type="password")
 
@@ -33,29 +31,26 @@ weekly_goal = st.sidebar.number_input("Weekly Income Goal ($)", value=2000, step
 target_dte = st.sidebar.slider("Target DTE", 7, 30, 7)
 target_delta = st.sidebar.slider("Target Delta", 0.10, 0.25, 0.18, 0.01)
 
-watchlist_default = "SNOW, SPCX, NBIS, NVDA, TSLA, GOOG, AMD, PLTR, PLTR, SKHY,TMUS, AAPL, AGNC, UBER"
+# Cleaned default watchlist with valid, high-volume tickers
+watchlist_default = "SNOW, NVDA, TSLA, GOOG, AMD, PLTR, UBER, SPY, QQQ"
 user_tickers = st.sidebar.text_area("Watchlist Tickers", value=watchlist_default)
 tickers = [t.strip().upper() for t in user_tickers.split(",") if t.strip()]
 
 scan_button = st.sidebar.button("🔄 Scan Live Market Data", use_container_width=True)
 
 # ==========================================
-# LIVE DATA FETCHING (FINNHUB REST API)
+# LIVE DATA FETCHING
 # ==========================================
 def fetch_finnhub_quote(symbol, token):
-    """Fetches real-time price quotes directly from Finnhub."""
     url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={token}"
     try:
         res = requests.get(url, timeout=5)
         if res.status_code == 200:
             data = res.json()
-            # 'c' = current price, 'pc' = previous close
             if "c" in data and data["c"] > 0:
                 return {
                     "current": float(data["c"]),
-                    "prev_close": float(data["pc"]),
-                    "high": float(data["h"]),
-                    "low": float(data["l"])
+                    "prev_close": float(data["pc"])
                 }
     except Exception:
         pass
@@ -70,7 +65,6 @@ def process_ticker(ticker, token, target_dte, target_delta):
     prev_close = quote["prev_close"]
     daily_change_pct = ((close - prev_close) / prev_close) * 100
 
-    # Institutional Signal Rules
     if daily_change_pct <= -1.0:
         signal = "🟢 SELL CSP"
         target_strike = round(close * (1 - (target_delta * 0.18)), 2)
@@ -81,7 +75,6 @@ def process_ticker(ticker, token, target_dte, target_delta):
         signal = "⚪ WAIT"
         target_strike = round(close * 0.95, 2)
 
-    # 7 DTE Delta/Yield Formula
     est_midpoint = round(close * 0.012, 2)
     credit_per_contract = est_midpoint * 100.0
 
@@ -102,28 +95,30 @@ def process_ticker(ticker, token, target_dte, target_delta):
 # SCANNER EXECUTION
 # ==========================================
 if scan_button or 'scan_data' not in st.session_state:
-    if not api_key:
-        st.error("Missing Finnhub API Key.")
-    else:
-        with st.spinner("Fetching Live Market Data from Finnhub API..."):
-            results = []
-            progress_bar = st.progress(0)
+    with st.spinner("Fetching Live Quotes from Finnhub API..."):
+        results = []
+        failed_tickers = []
+        
+        for t in tickers:
+            res = process_ticker(t, api_key, target_dte, target_delta)
+            if res:
+                results.append(res)
+            else:
+                failed_tickers.append(t)
+            time.sleep(0.1)
             
-            for idx, t in enumerate(tickers):
-                res = process_ticker(t, api_key, target_dte, target_delta)
-                if res:
-                    results.append(res)
-                time.sleep(0.12)  # Respect Finnhub rate limits (60 requests/min)
-                progress_bar.progress((idx + 1) / len(tickers))
-                
-            progress_bar.empty()
-            st.session_state.scan_data = results
+        st.session_state.scan_data = results
+        st.session_state.failed_tickers = failed_tickers
 
 results = st.session_state.get('scan_data', [])
+failed = st.session_state.get('failed_tickers', [])
 
 # ==========================================
-# RENDER TABLE & METRICS
+# RENDER LOGIC
 # ==========================================
+if failed:
+    st.warning(f"⚠️ Could not fetch data for: {', '.join(failed)}. Verify these ticker symbols are valid.")
+
 if results:
     df_display = pd.DataFrame([{
         "Ticker": r["Ticker"],
@@ -149,26 +144,3 @@ if results:
 
     styled_df = df_display.style.map(highlight_signal, subset=["Signal"])
     st.dataframe(styled_df, use_container_width=True, height=400)
-
-    st.markdown("---")
-    st.subheader("📈 Quick Price vs. Strike Breakdown")
-    
-    selected_ticker = st.selectbox("Select Ticker to View Strike Target:", [r["Ticker"] for r in results])
-    t_data = next((item for item in results if item["Ticker"] == selected_ticker), None)
-
-    if t_data:
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=["Current Price", "Target Strike", "Put Wall (Support)", "Call Wall (Resist)"],
-            y=[t_data["Price"], t_data["Target Strike"], t_data["Put Wall"], t_data["Call Wall"]],
-            marker_color=["#00F0FF", "#4EFE96" if "CSP" in t_data["Signal"] else "#FF6B6B", "#22C55E", "#EF4444"]
-        ))
-        fig.update_layout(
-            template="plotly_dark",
-            title=f"{selected_ticker} Key Price & Option Levels",
-            yaxis_title="Price ($)",
-            height=380
-        )
-        st.plotly_chart(fig, use_container_width=True)
-else:
-    st.info("👈 Click '🔄 Scan Live Market Data' in the sidebar to load current quotes.")
