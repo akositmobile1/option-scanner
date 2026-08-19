@@ -32,7 +32,7 @@ weekly_goal = st.sidebar.number_input("Weekly Income Goal ($)", value=2000, step
 target_dte = st.sidebar.slider("Target DTE", 7, 30, 7)
 target_delta = st.sidebar.slider("Target Delta", 0.10, 0.25, 0.18, 0.01)
 
-watchlist_default = "SNOW, TMUS, NBIS, SPCX, SKHY, IREN, RDDT, NVDA, TSLA, GOOG, AMD, PLTR, UBER, SPY, QQQ"
+watchlist_default = "SNOW, NVDA, TSLA, GOOG, AMD, PLTR, UBER, SPY, QQQ"
 user_tickers = st.sidebar.text_area("Watchlist Tickers", value=watchlist_default)
 tickers = [t.strip().upper() for t in user_tickers.split(",") if t.strip()]
 
@@ -95,17 +95,14 @@ def process_ticker(ticker, target_dte, target_delta):
         "Max Pain": round(close, 2)
     }
 
-import datetime
-
 # ==========================================
-# DIRECT YAHOO REST API CHART FETCH (FIXED FOR FULL HISTORY)
+# DIRECT YAHOO REST API CHART FETCH (WITH EPOCH TIME RANGE)
 # ==========================================
 def fetch_chart_rest_api(symbol):
-    """Hits Yahoo's direct query API with explicit timestamps for historical series."""
+    """Hits Yahoo's direct query API with explicit epoch range to ensure full historical series."""
     end_time = int(datetime.datetime.now().timestamp())
     start_time = int((datetime.datetime.now() - datetime.timedelta(days=365)).timestamp())
     
-    # Using period1 and period2 forces Yahoo to return the full historical sequence
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?period1={start_time}&period2={end_time}&interval=1d"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     
@@ -154,24 +151,33 @@ results = st.session_state.get('scan_data', [])
 failed = st.session_state.get('failed_tickers', [])
 
 # ==========================================
-# RENDER TABLE
+# RENDER TABLE (WITH SIZING & MARGIN CALCULATIONS)
 # ==========================================
 if failed:
     st.warning(f"⚠️ Could not pull Yahoo data for: {', '.join(failed)}. Symbol may be invalid or halted.")
 
 if results:
-    df_display = pd.DataFrame([{
-        "Ticker": r["Ticker"],
-        "Price": f"${r['Price']:.2f}",
-        "Signal": r["Signal"],
-        "Target Strike": f"${r['Target Strike']:.2f}",
-        "Mid Premium": f"${r['Mid Premium']:.2f}",
-        "Credit / Contract": r["Credit / Contract"],
-        "Est. Yield ($)": r["Est. Yield ($)"],
-        "Put Wall": f"${r['Put Wall']:.2f}",
-        "Call Wall": f"${r['Call Wall']:.2f}",
-        "Max Pain": f"${r['Max Pain']:.2f}"
-    } for r in results])
+    table_rows = []
+    for r in results:
+        credit_num = r["Est. Yield ($)"]
+        contracts_needed = int(np.ceil(weekly_goal / credit_num)) if credit_num > 0 else 0
+        total_collateral = contracts_needed * r["Target Strike"] * 100.0
+
+        table_rows.append({
+            "Ticker": r["Ticker"],
+            "Price": f"${r['Price']:.2f}",
+            "Signal": r["Signal"],
+            "Target Strike": f"${r['Target Strike']:.2f}",
+            "Mid Premium": f"${r['Mid Premium']:.2f}",
+            "Credit / Contract": r["Credit / Contract"],
+            "Contracts": f"{contracts_needed}x",
+            "Req. Collateral": f"${total_collateral:,.0f}",
+            "Put Wall": f"${r['Put Wall']:.2f}",
+            "Call Wall": f"${r['Call Wall']:.2f}",
+            "Max Pain": f"${r['Max Pain']:.2f}"
+        })
+
+    df_display = pd.DataFrame(table_rows)
 
     st.subheader("📋 Real-Time Yahoo Market Table")
     
@@ -186,7 +192,7 @@ if results:
     st.dataframe(styled_df, use_container_width=True, height=400)
 
     # ==========================================
-    # MONDAY TECHNICAL ANALYSIS CHART ENGINE
+    # TECHNICAL ANALYSIS CHART ENGINE
     # ==========================================
     st.markdown("---")
     st.subheader("📈 Technical Confirmation & Volatility Bounds")
@@ -196,7 +202,7 @@ if results:
 
     if t_data:
         try:
-            with st.spinner(f"Loading 6-Month Chart for {selected_ticker}..."):
+            with st.spinner(f"Loading Chart for {selected_ticker}..."):
                 df_chart = fetch_chart_rest_api(selected_ticker)
 
             if df_chart is not None and not df_chart.empty:
